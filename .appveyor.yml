@@ -1,0 +1,119 @@
+
+environment:
+  matrix:
+    - job_name: Windows
+      APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+      configuration: Debug
+
+    - job_name: Windows
+      APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+      configuration: Release
+
+    - job_name: Windows
+      APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+      configuration: Retail
+
+    - job_name: Linux
+      APPVEYOR_BUILD_WORKER_IMAGE: Ubuntu2204
+      buildcfg: debug64
+
+    - job_name: Linux
+      APPVEYOR_BUILD_WORKER_IMAGE: Ubuntu2204
+      buildcfg: release64
+
+    - job_name: Linux
+      APPVEYOR_BUILD_WORKER_IMAGE: Ubuntu2204
+      buildcfg: retail64
+
+    - job_name: OSX
+      APPVEYOR_BUILD_WORKER_IMAGE: macOS-sonoma
+      buildcfg: debug64
+
+    - job_name: OSX
+      APPVEYOR_BUILD_WORKER_IMAGE: macOS-sonoma
+      buildcfg: release64
+
+    - job_name: OSX
+      APPVEYOR_BUILD_WORKER_IMAGE: macOS-sonoma
+      buildcfg: retail64
+
+shallow_clone: true
+
+for:
+
+# ======================================
+#      Windows
+# ======================================
+
+  -
+    matrix:
+      only:
+      - job_name: Windows
+
+    init:
+      - git clone https://github.com/RudjiGames/rg_memory rg_memory
+      - git clone https://github.com/RudjiGames/zidar     zidar
+
+    install:
+      - zidar\tools\bin\windows\genie.exe --zidar-path=zidar --file=rg_memory\scripts\genie.lua --with-unittests vs2022
+
+    build:
+      project: .zidar\windows\vs2022\rg_memory\projects\vs2022\rg_memory.sln
+
+    test_script:
+      - ps: |
+          $exe = Get-ChildItem -Path .zidar -Recurse -Filter 'rg_memory_test_*.exe' | Select-Object -First 1
+          if (-not $exe) { Write-Error 'Test executable not found'; exit 1 }
+          Write-Host "Running $($exe.FullName)"
+          & $exe.FullName
+          exit $LASTEXITCODE
+
+# ======================================
+# Linux
+# ======================================
+
+  -
+    matrix:
+      only:
+      - job_name: Linux
+
+    init:
+      - git clone https://github.com/RudjiGames/rg_memory rg_memory
+      - git clone https://github.com/RudjiGames/zidar      zidar
+      - git clone https://github.com/bkaradzic/GENie       GENie		# build GENie from source: `GLIBC_2.29' not found
+      - cd GENie && make && cd ..
+
+    install:
+      - ./GENie/bin/linux/genie --zidar-path=zidar --file=rg_memory/scripts/genie.lua --with-unittests --gcc=linux-gcc gmake
+
+    build_script:
+      - cd ./.zidar/linux/linux-gcc/rg_memory/projects/
+      - make config=${buildcfg}
+
+    test_script:
+      - find ./.zidar -type f -name 'rg_memory_test_*' -exec {} \;
+
+# ======================================
+# OSX
+# ======================================
+
+  -
+    matrix:
+      only:
+      - job_name: OSX
+
+    init:
+      - git clone https://github.com/RudjiGames/rg_memory rg_memory
+      - git clone https://github.com/RudjiGames/zidar      zidar
+      - git clone https://github.com/bkaradzic/GENie       GENie  # build GENie from source: we don't know the target CPU, can't use ARM binary from 'build'
+      - cd GENie && make && cd ..
+
+    install:
+      - ./GENie/bin/darwin/genie --zidar-path=zidar --file=rg_memory/scripts/genie.lua --with-unittests --gcc=osx-x64 gmake
+
+    build_script:
+      - cd ./.zidar/osx/clang/rg_memory/projects/
+      - make config=${buildcfg}
+
+    test_script:
+      - find ./.zidar -type f -name 'rg_memory_test_*' -exec {} \;

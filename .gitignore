@@ -1,0 +1,13 @@
+*.ninja
+.ninja_deps
+.ninja_log
+tags
+
+# Directories not to commit
+
+.build
+.3rd
+.DS_Store
+.qt
+.zidar
+
