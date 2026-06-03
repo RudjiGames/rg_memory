@@ -737,3 +737,39 @@ void rgArenaShrink(Arena* _arena)
 
     _arena->m_committed = newCommitted;
 }
+
+void rgArenaDecommitFront(Arena* _arena, uint64_t _upToOffset)
+{
+    if (!rgm_arena_is_live(_arena))
+    {
+        return;
+    }
+    /* File views are fully backed by the file; partial decommit would corrupt the mapping. */
+    if (_arena->m_backing == RGM_ARENA_BACKING_FILE)
+    {
+        return;
+    }
+
+    uint64_t page = rgm_page_size();
+    /* Only release pages that are *entirely* below _upToOffset (round the boundary DOWN). */
+    uint64_t end  = _upToOffset & ~(page - 1);
+    if (end > _arena->m_committed)
+    {
+        end = _arena->m_committed & ~(page - 1);
+    }
+    if (end == 0)
+    {
+        return; /* nothing fully consumed yet */
+    }
+
+    /* Releases [m_base, m_base + end). This deliberately leaves a decommitted hole at the front and
+     * does NOT maintain the contiguous-commit invariant: after a front-decommit the arena is valid
+     * only to keep *reading past* _upToOffset until rgArenaDestroy (which releases the whole
+     * reservation regardless of commit state). Intended for streaming filter-compaction, where the
+     * source is consumed front-to-back and torn down once done - keeping peak commit ~= one arena. */
+#if RGM_PLATFORM_WINDOWS
+    (void)VirtualFree(_arena->m_base, (SIZE_T)end, MEM_DECOMMIT);
+#else
+    (void)madvise(_arena->m_base, (size_t)end, MADV_DONTNEED);
+#endif
+}

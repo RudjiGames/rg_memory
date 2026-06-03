@@ -545,6 +545,26 @@ extern "C" {
      */
     void rgArenaShrink(Arena* _arena);
 
+    /* Release physical pages from the FRONT of the arena - everything strictly below _upToOffset
+     * (rounded DOWN to the page size, so only fully-consumed pages are dropped). Unlike
+     * rgArenaShrink (which trims the unused tail above the high-water mark), this punches a
+     * decommitted hole at the base and does NOT preserve the contiguous-commit invariant: the
+     * arena is afterwards valid only for reading past _upToOffset, until rgArenaDestroy releases
+     * the whole reservation. Designed for streaming filter-compaction - walk a source arena
+     * front-to-back, copy survivors into a destination arena, and decommit consumed source pages
+     * behind the cursor so peak commit stays ~= one arena instead of source + destination.
+     *
+     *   - Windows : VirtualFree(base, len, MEM_DECOMMIT)
+     *   - POSIX   : madvise(base, len, MADV_DONTNEED)
+     *
+     * No-op on NULL/uninitialised/file-backed arenas, or when nothing is fully consumed yet.
+     *
+     * @param[in] _arena      - Arena whose front pages to release.
+     * @param[in] _upToOffset - Bytes from the base that have been consumed; pages wholly below
+     *                          this (page-aligned down) are decommitted.
+     */
+    void rgArenaDecommitFront(Arena* _arena, uint64_t _upToOffset);
+
 /*--------------------------------------------------------------------------
  * FreeList API
  *------------------------------------------------------------------------*/
