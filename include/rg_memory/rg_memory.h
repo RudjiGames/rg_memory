@@ -382,6 +382,27 @@ extern "C" {
      */
     int32_t rgArenaCreateShared(Arena* _arena, const char* _path, uint64_t _arenaSize);
 
+    /* Like rgArenaCreateShared, but the backing file is a TEMPORARY that the OS
+     * removes automatically once the mapping is released -- on rgArenaDestroy
+     * (unmap) and, crucially, on process exit of ANY kind including a crash,
+     * kill or TerminateProcess. Windows opens it FILE_FLAG_DELETE_ON_CLOSE (the
+     * live view holds the file until unmap / process death, then it is deleted);
+     * POSIX unlink()s the path immediately after open (the inode lives on via
+     * the mapping and vanishes when it is released). The file therefore never
+     * leaks even if the process never runs its destructors. If the platform /
+     * filesystem cannot honour auto-delete the call transparently falls back to
+     * a plain shared file (the caller is then responsible for removing _path).
+     *
+     * Use this for scratch / spill files that must not outlive the process;
+     * use rgArenaCreateShared for files meant to persist (e.g. on-disk maps).
+     *
+     * @param[out] _arena     - Arena to initialise. Must be non-NULL.
+     * @param[in]  _path      - Filesystem path for the backing temp file.
+     * @param[in]  _arenaSize - File / mapping size in bytes (page-rounded).
+     * @returns 0 on success, -1 invalid argument, -5 on file/mapping failure.
+     */
+    int32_t rgArenaCreateSharedTemp(Arena* _arena, const char* _path, uint64_t _arenaSize);
+
     /* Map an existing arena file created by rgArenaCreateShared.
      *
      * Maps the whole file at its current size. The arena initially reports

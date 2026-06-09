@@ -210,10 +210,19 @@ static void rgm_vm_release(void* _base, uint64_t _bytes, uint32_t _backing)
  * carries no handle and teardown needs only the base pointer.
  *
  * _openExisting == 0 creates / truncates the file to _bytes; != 0 maps an
- * existing file at its current size (_bytes ignored). Returns .base == NULL
- * on any failure (open, size query, truncate, or map). */
+ * existing file at its current size (_bytes ignored).
+ *
+ * _deleteOnClose != 0 (create path only) makes the file a self-cleaning
+ * temporary: Windows opens it FILE_FLAG_DELETE_ON_CLOSE (the live view holds it
+ * until unmap / process death, then the OS deletes it); POSIX unlink()s the
+ * path right after open so the inode is reclaimed when the mapping is released.
+ * On Windows, if the create fails WITH the flag (some network filesystems
+ * reject it) we retry without it and the file behaves as an ordinary one.
+ *
+ * Returns .base == NULL on any failure (open, size query, truncate, or map). */
 static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
-                                     int _openExisting, int _readOnly)
+                                     int _openExisting, int _readOnly,
+                                     int _deleteOnClose)
 {
     rgm_vm_result r;
     r.base      = NULL;
@@ -225,8 +234,22 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
         DWORD  access = _readOnly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
         DWORD  share  = FILE_SHARE_READ | (_readOnly ? 0u : (DWORD)FILE_SHARE_WRITE);
         DWORD  disp   = _openExisting ? OPEN_EXISTING : CREATE_ALWAYS;
-        HANDLE f = CreateFileA(_path, access, share, NULL, disp,
-                               FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD  attr   = FILE_ATTRIBUTE_NORMAL;
+        HANDLE f;
+        if (_deleteOnClose && !_openExisting)
+        {
+            attr  |= FILE_FLAG_DELETE_ON_CLOSE;
+            share |= FILE_SHARE_DELETE;	/* allow the delete disposition while mapped */
+        }
+        f = CreateFileA(_path, access, share, NULL, disp, attr, NULL);
+        if (f == INVALID_HANDLE_VALUE && (attr & FILE_FLAG_DELETE_ON_CLOSE))
+        {
+            /* Filesystem rejected DELETE_ON_CLOSE -- fall back to a plain file
+             * (the caller's explicit unlink path then handles removal). */
+            attr  &= ~(DWORD)FILE_FLAG_DELETE_ON_CLOSE;
+            share &= ~(DWORD)FILE_SHARE_DELETE;
+            f = CreateFileA(_path, access, share, NULL, disp, attr, NULL);
+        }
         if (f == INVALID_HANDLE_VALUE)
         {
             return r;
@@ -281,6 +304,14 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
         if (fd < 0)
         {
             return r;
+        }
+
+        /* Self-cleaning temp: drop the name now -- the open fd (and the mmap
+         * below, which takes its own reference) keep the inode alive until the
+         * mapping is released or the process dies, then the OS reclaims it. */
+        if (_deleteOnClose && !_openExisting)
+        {
+            unlink(_path);
         }
 
         uint64_t size = _bytes;
@@ -463,7 +494,7 @@ int32_t rgArenaCreateShared(Arena* _arena, const char* _path, uint64_t _arenaSiz
     }
 
     uint64_t      size = rgm_align_up(_arenaSize, rgm_page_size());
-    rgm_vm_result r    = rgm_vm_map_file(_path, size, 0 /*create*/, 0 /*rw*/);
+    rgm_vm_result r    = rgm_vm_map_file(_path, size, 0 /*create*/, 0 /*rw*/, 0 /*keep file*/);
     if (r.base == NULL)
     {
         return RGM_ERROR_ERR_IO;
@@ -472,6 +503,31 @@ int32_t rgArenaCreateShared(Arena* _arena, const char* _path, uint64_t _arenaSiz
     _arena->m_base      = (uint8_t*)r.base;
     _arena->m_reserved  = r.reserved;
     _arena->m_committed = r.committed; /* whole file is backed; no later commit step. */
+    _arena->m_pos       = 0;
+    _arena->m_backing   = RGM_ARENA_BACKING_FILE;
+    return RGM_ERROR_OK;
+}
+
+/* Create a shared file-backed arena whose file is an auto-deleting temporary
+ * (see the header). Identical to rgArenaCreateShared except for the delete-on-
+ * close request, so the file cannot outlive the process. */
+int32_t rgArenaCreateSharedTemp(Arena* _arena, const char* _path, uint64_t _arenaSize)
+{
+    if (_arena == NULL || _path == NULL || _arenaSize == 0)
+    {
+        return RGM_ERROR_ERR_INVALID;
+    }
+
+    uint64_t      size = rgm_align_up(_arenaSize, rgm_page_size());
+    rgm_vm_result r    = rgm_vm_map_file(_path, size, 0 /*create*/, 0 /*rw*/, 1 /*delete on close*/);
+    if (r.base == NULL)
+    {
+        return RGM_ERROR_ERR_IO;
+    }
+
+    _arena->m_base      = (uint8_t*)r.base;
+    _arena->m_reserved  = r.reserved;
+    _arena->m_committed = r.committed;
     _arena->m_pos       = 0;
     _arena->m_backing   = RGM_ARENA_BACKING_FILE;
     return RGM_ERROR_OK;
@@ -488,7 +544,7 @@ int32_t rgArenaOpenShared(Arena* _arena, const char* _path, int _readOnly)
         return RGM_ERROR_ERR_INVALID;
     }
 
-    rgm_vm_result r = rgm_vm_map_file(_path, 0, 1 /*open existing*/, _readOnly);
+    rgm_vm_result r = rgm_vm_map_file(_path, 0, 1 /*open existing*/, _readOnly, 0 /*keep file*/);
     if (r.base == NULL)
     {
         return RGM_ERROR_ERR_IO;
