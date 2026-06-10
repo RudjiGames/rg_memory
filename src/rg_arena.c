@@ -360,6 +360,14 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
  * the same regardless of size, so any reasonable value works. */
 #define RGM_COMMIT_MIN_CHUNK (64ull * 1024ull)
 
+/* Cap on the geometric commit step. Pure doubling is ideal for small arenas (O(log N)
+ * commit syscalls), but on a multi-GB arena the final 2x over-commits up to ~1 GB that is
+ * never touched (e.g. a 3 GB op-store column doubles 2->4 GB). Past this cap the arena
+ * grows LINEARLY by RGM_COMMIT_MAX_STEP, so committed stays within one step of the high
+ * water mark. 64 MB keeps the extra commit syscalls negligible (a few dozen on a 3 GB
+ * arena) while bounding wasted commit to <64 MB per arena. */
+#define RGM_COMMIT_MAX_STEP  (64ull * 1024ull * 1024ull)
+
 /* An Arena with m_base == NULL is treated as uninitialised: queries report
  * zero, Alloc returns NULL, Destroy / Clear do nothing. */
 static int rgm_arena_is_live(const Arena* _a)
@@ -384,6 +392,10 @@ static int rgm_arena_ensure_committed(Arena* _a, uint64_t _required_pos)
     }
 
     uint64_t target = _a->m_committed * 2;
+    if (target > _a->m_committed + RGM_COMMIT_MAX_STEP)	/* cap the doubling on large arenas (see RGM_COMMIT_MAX_STEP) */
+    {
+        target = _a->m_committed + RGM_COMMIT_MAX_STEP;
+    }
     if (target < _required_pos)
     {
         target = _required_pos;
