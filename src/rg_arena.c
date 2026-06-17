@@ -94,12 +94,12 @@ typedef struct rgm_vm_result
  * obtain huge pages (privilege missing, OS support absent, contiguous
  * physical block unavailable) silently degrades to the normal-pages path.
  *
- * The returned struct has .base == NULL on hard failure (no normal-pages
+ * The returned struct has .base == 0 on hard failure (no normal-pages
  * fallback succeeded either). */
 static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
 {
     rgm_vm_result r;
-    r.base      = NULL;
+    r.base      = 0;
     r.reserved  = 0;
     r.committed = 0;
 
@@ -114,10 +114,10 @@ static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
         if (lp != 0)
         {
             uint64_t hugeBytes = rgm_align_up(_bytes, (uint64_t)lp);
-            void*    p = VirtualAlloc(NULL, (SIZE_T)hugeBytes,
+            void*    p = VirtualAlloc(0, (SIZE_T)hugeBytes,
                                       MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES,
                                       PAGE_READWRITE);
-            if (p != NULL)
+            if (p != 0)
             {
                 r.base      = p;
                 r.reserved  = hugeBytes;
@@ -129,8 +129,8 @@ static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
     }
 
     {
-        void* p = VirtualAlloc(NULL, (SIZE_T)_bytes, MEM_RESERVE, PAGE_NOACCESS);
-        if (p != NULL)
+        void* p = VirtualAlloc(0, (SIZE_T)_bytes, MEM_RESERVE, PAGE_NOACCESS);
+        if (p != 0)
         {
             r.base     = p;
             r.reserved = _bytes;
@@ -138,7 +138,7 @@ static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
     }
 #else
     {
-        void* p = mmap(NULL, (size_t)_bytes, PROT_NONE,
+        void* p = mmap(0, (uint64_t)_bytes, PROT_NONE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (p != MAP_FAILED)
         {
@@ -153,7 +153,7 @@ static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
              * MADV_HUGEPAGE and silently falls through with normal pages. */
             if (_flags & RGM_ARENA_FLAG_HUGE_PAGES)
             {
-                (void)madvise(p, (size_t)_bytes, MADV_HUGEPAGE);
+                (void)madvise(p, (uint64_t)_bytes, MADV_HUGEPAGE);
             }
 #   else
             (void)_flags;
@@ -168,9 +168,9 @@ static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
 static int rgm_vm_commit(void* _base, uint64_t _bytes)
 {
 #if RGM_PLATFORM_WINDOWS
-    return VirtualAlloc(_base, (SIZE_T)_bytes, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    return VirtualAlloc(_base, (SIZE_T)_bytes, MEM_COMMIT, PAGE_READWRITE) != 0;
 #else
-    return mprotect(_base, (size_t)_bytes, PROT_READ | PROT_WRITE) == 0;
+    return mprotect(_base, (uint64_t)_bytes, PROT_READ | PROT_WRITE) == 0;
 #endif
 }
 
@@ -198,7 +198,7 @@ static void rgm_vm_release(void* _base, uint64_t _bytes, uint32_t _backing)
     /* munmap releases both anonymous and file-backed mappings; the file
      * itself is unaffected. */
     (void)_backing;
-    munmap(_base, (size_t)_bytes);
+    munmap(_base, (uint64_t)_bytes);
 #endif
 }
 
@@ -219,13 +219,13 @@ static void rgm_vm_release(void* _base, uint64_t _bytes, uint32_t _backing)
  * On Windows, if the create fails WITH the flag (some network filesystems
  * reject it) we retry without it and the file behaves as an ordinary one.
  *
- * Returns .base == NULL on any failure (open, size query, truncate, or map). */
+ * Returns .base == 0 on any failure (open, size query, truncate, or map). */
 static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
                                      int _openExisting, int _readOnly,
                                      int _deleteOnClose)
 {
     rgm_vm_result r;
-    r.base      = NULL;
+    r.base      = 0;
     r.reserved  = 0;
     r.committed = 0;
 
@@ -241,14 +241,14 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             attr  |= FILE_FLAG_DELETE_ON_CLOSE;
             share |= FILE_SHARE_DELETE;	/* allow the delete disposition while mapped */
         }
-        f = CreateFileA(_path, access, share, NULL, disp, attr, NULL);
+        f = CreateFileA(_path, access, share, 0, disp, attr, 0);
         if (f == INVALID_HANDLE_VALUE && (attr & FILE_FLAG_DELETE_ON_CLOSE))
         {
             /* Filesystem rejected DELETE_ON_CLOSE -- fall back to a plain file
              * (the caller's explicit unlink path then handles removal). */
             attr  &= ~(DWORD)FILE_FLAG_DELETE_ON_CLOSE;
             share &= ~(DWORD)FILE_SHARE_DELETE;
-            f = CreateFileA(_path, access, share, NULL, disp, attr, NULL);
+            f = CreateFileA(_path, access, share, 0, disp, attr, 0);
         }
         if (f == INVALID_HANDLE_VALUE)
         {
@@ -271,11 +271,11 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             DWORD  prot = _readOnly ? PAGE_READONLY : PAGE_READWRITE;
             /* On create, the max-size args grow the file to `size`; on open,
              * 0/0 maps the whole existing file. */
-            HANDLE map = CreateFileMappingA(f, NULL, prot,
+            HANDLE map = CreateFileMappingA(f, 0, prot,
                             _openExisting ? 0u : (DWORD)(size >> 32),
                             _openExisting ? 0u : (DWORD)(size & 0xffffffffu),
-                            NULL);
-            if (map == NULL)
+                            0);
+            if (map == 0)
             {
                 CloseHandle(f);
                 return r;
@@ -286,7 +286,7 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
                 /* Both handles can go now -- the view keeps the file mapped. */
                 CloseHandle(map);
                 CloseHandle(f);
-                if (base == NULL)
+                if (base == 0)
                 {
                     return r;
                 }
@@ -333,7 +333,7 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
 
         {
             int   prot = PROT_READ | (_readOnly ? 0 : PROT_WRITE);
-            void* base = mmap(NULL, (size_t)size, prot, MAP_SHARED, fd, 0);
+            void* base = mmap(0, (uint64_t)size, prot, MAP_SHARED, fd, 0);
             /* mmap keeps its own reference; closing fd does not unmap. */
             close(fd);
             if (base == MAP_FAILED)
@@ -368,11 +368,11 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
  * arena) while bounding wasted commit to <64 MB per arena. */
 #define RGM_COMMIT_MAX_STEP  (64ull * 1024ull * 1024ull)
 
-/* An Arena with m_base == NULL is treated as uninitialised: queries report
- * zero, Alloc returns NULL, Destroy / Clear do nothing. */
+/* An Arena with m_base == 0 is treated as uninitialised: queries report
+ * zero, Alloc returns 0, Destroy / Clear do nothing. */
 static int rgm_arena_is_live(const Arena* _a)
 {
-    return _a != NULL && _a->m_base != NULL;
+    return _a != 0 && _a->m_base != 0;
 }
 
 /* Ensure pages covering [0 .. _required_pos) are committed. Grows the
@@ -420,14 +420,14 @@ static int rgm_arena_ensure_committed(Arena* _a, uint64_t _required_pos)
 }
 
 /* Core aligned bump-allocation. Advances pos and returns the user pointer.
- * Returns NULL on out-of-memory or invalid args. */
+ * Returns 0 on out-of-memory or invalid args. */
 static void* rgm_arena_alloc_internal(Arena* _a, uint64_t _size, uint64_t _align)
 {
     RGM_ASSERT(_align != 0 && (_align & (_align - 1)) == 0);
 
     if (_size == 0)
     {
-        return NULL;
+        return 0;
     }
     if (_align < 8)
     {
@@ -445,11 +445,11 @@ static void* rgm_arena_alloc_internal(Arena* _a, uint64_t _size, uint64_t _align
      * large; without it the wrapped value would compare under _a->m_reserved. */
     if (new_pos < user_off || new_pos > _a->m_reserved)
     {
-        return NULL;
+        return 0;
     }
     if (!rgm_arena_ensure_committed(_a, new_pos))
     {
-        return NULL;
+        return 0;
     }
 
     _a->m_pos = new_pos;
@@ -471,7 +471,7 @@ int32_t rgArenaCreate(Arena* _arena, uint64_t _arenaSize)
  * the creation -- they degrade to the normal-pages path silently. */
 int32_t rgArenaCreateEx(Arena* _arena, uint64_t _arenaSize, uint32_t _flags)
 {
-    if (_arena == NULL || _arenaSize == 0)
+    if (_arena == 0 || _arenaSize == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -479,7 +479,7 @@ int32_t rgArenaCreateEx(Arena* _arena, uint64_t _arenaSize, uint32_t _flags)
     uint64_t      page    = rgm_page_size();
     uint64_t      request = rgm_align_up(_arenaSize, page);
     rgm_vm_result r       = rgm_vm_reserve(request, _flags);
-    if (r.base == NULL)
+    if (r.base == 0)
     {
         return RGM_ERROR_ERR_NO_MEMORY;
     }
@@ -500,14 +500,14 @@ int32_t rgArenaCreateEx(Arena* _arena, uint64_t _arenaSize, uint32_t _flags)
  * persistent, position-independent on-disk hash map. See rg_memory.h. */
 int32_t rgArenaCreateShared(Arena* _arena, const char* _path, uint64_t _arenaSize)
 {
-    if (_arena == NULL || _path == NULL || _arenaSize == 0)
+    if (_arena == 0 || _path == 0 || _arenaSize == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 
     uint64_t      size = rgm_align_up(_arenaSize, rgm_page_size());
     rgm_vm_result r    = rgm_vm_map_file(_path, size, 0 /*create*/, 0 /*rw*/, 0 /*keep file*/);
-    if (r.base == NULL)
+    if (r.base == 0)
     {
         return RGM_ERROR_ERR_IO;
     }
@@ -525,14 +525,14 @@ int32_t rgArenaCreateShared(Arena* _arena, const char* _path, uint64_t _arenaSiz
  * close request, so the file cannot outlive the process. */
 int32_t rgArenaCreateSharedTemp(Arena* _arena, const char* _path, uint64_t _arenaSize)
 {
-    if (_arena == NULL || _path == NULL || _arenaSize == 0)
+    if (_arena == 0 || _path == 0 || _arenaSize == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 
     uint64_t      size = rgm_align_up(_arenaSize, rgm_page_size());
     rgm_vm_result r    = rgm_vm_map_file(_path, size, 0 /*create*/, 0 /*rw*/, 1 /*delete on close*/);
-    if (r.base == NULL)
+    if (r.base == 0)
     {
         return RGM_ERROR_ERR_IO;
     }
@@ -551,13 +551,13 @@ int32_t rgArenaCreateSharedTemp(Arena* _arena, const char* _path, uint64_t _aren
  * map can be appended to. Pass _readOnly != 0 for a read-only mapping. */
 int32_t rgArenaOpenShared(Arena* _arena, const char* _path, int _readOnly)
 {
-    if (_arena == NULL || _path == NULL)
+    if (_arena == 0 || _path == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 
     rgm_vm_result r = rgm_vm_map_file(_path, 0, 1 /*open existing*/, _readOnly, 0 /*keep file*/);
-    if (r.base == NULL)
+    if (r.base == 0)
     {
         return RGM_ERROR_ERR_IO;
     }
@@ -581,7 +581,7 @@ void rgArenaFlush(Arena* _arena)
 #if RGM_PLATFORM_WINDOWS
     (void)FlushViewOfFile(_arena->m_base, (SIZE_T)_arena->m_committed);
 #else
-    (void)msync(_arena->m_base, (size_t)_arena->m_committed, MS_SYNC);
+    (void)msync(_arena->m_base, (uint64_t)_arena->m_committed, MS_SYNC);
 #endif
 }
 
@@ -592,7 +592,7 @@ int rgArenaIsValid(Arena* _arena)
 }
 
 /* Release the VM reservation and put *_arena back into the inert state.
- * Idempotent and NULL-safe. */
+ * Idempotent and 0-safe. */
 void rgArenaDestroy(Arena* _arena)
 {
     if (!rgm_arena_is_live(_arena))
@@ -600,7 +600,7 @@ void rgArenaDestroy(Arena* _arena)
         return;
     }
     rgm_vm_release(_arena->m_base, _arena->m_reserved, _arena->m_backing);
-    _arena->m_base      = NULL;
+    _arena->m_base      = 0;
     _arena->m_reserved  = 0;
     _arena->m_committed = 0;
     _arena->m_pos       = 0;
@@ -619,11 +619,11 @@ void rgArenaClear(Arena* _arena)
 }
 
 /* Default-aligned (16-byte) bump allocation, with an inlined fast path for the common case. */
-void* rgArenaAlloc(Arena* restrict _arena, size_t _size)
+void* rgArenaAlloc(Arena* restrict _arena, uint64_t _size)
 {
     if (!rgm_arena_is_live(_arena) || _size == 0)
     {
-        return NULL;
+        return 0;
     }
 
     /* Fast path: the common case where the bump fits inside already-committed
@@ -648,11 +648,11 @@ void* rgArenaAlloc(Arena* restrict _arena, size_t _size)
 }
 
 /* Bump allocation with a caller-specified power-of-two alignment. */
-void* rgArenaAllocAligned(Arena* restrict _arena, size_t _size, size_t _alignment)
+void* rgArenaAllocAligned(Arena* restrict _arena, uint64_t _size, uint64_t _alignment)
 {
     if (!rgm_arena_is_live(_arena) || _size == 0)
     {
-        return NULL;
+        return 0;
     }
 
     uint64_t align = (uint64_t)_alignment;
@@ -680,7 +680,7 @@ void* rgArenaAllocAligned(Arena* restrict _arena, size_t _size, size_t _alignmen
 }
 
 /* Rewind the bump pointer by _size bytes (LIFO; the value is unchecked). */
-void rgArenaPop(Arena* _arena, size_t _size)
+void rgArenaPop(Arena* _arena, uint64_t _size)
 {
     if (!rgm_arena_is_live(_arena))
     {
@@ -695,7 +695,7 @@ void rgArenaPop(Arena* _arena, size_t _size)
 }
 
 /* Like rgArenaPop, but debug-asserts the resulting position is _alignment-aligned. */
-void rgArenaPopAligned(Arena* _arena, size_t _size, size_t _alignment)
+void rgArenaPopAligned(Arena* _arena, uint64_t _size, uint64_t _alignment)
 {
     if (!rgm_arena_is_live(_arena))
     {
@@ -718,7 +718,7 @@ void rgArenaPopAligned(Arena* _arena, size_t _size, size_t _alignment)
 }
 
 /* Capture the current high-water mark for a later rgArenaRestore.
- * Returns RGM_ARENA_INVALID_SAVE_POINT for a NULL or uninitialised arena so
+ * Returns RGM_ARENA_INVALID_SAVE_POINT for a 0 or uninitialised arena so
  * callers can distinguish that failure from an empty arena (which legitimately
  * returns 0). */
 ArenaSavePoint rgArenaSave(Arena* _arena)
@@ -796,8 +796,8 @@ void rgArenaShrink(Arena* _arena)
      * immediately (Linux) or lazily (macOS). mprotect back to PROT_NONE
      * matches the initial reserve state -- any stray access traps
      * instead of silently faulting in zeroed pages. */
-    (void)madvise(decommitBase, (size_t)decommitLen, MADV_DONTNEED);
-    if (mprotect(decommitBase, (size_t)decommitLen, PROT_NONE) != 0)
+    (void)madvise(decommitBase, (uint64_t)decommitLen, MADV_DONTNEED);
+    if (mprotect(decommitBase, (uint64_t)decommitLen, PROT_NONE) != 0)
     {
         return;
     }
@@ -838,6 +838,6 @@ void rgArenaDecommitFront(Arena* _arena, uint64_t _upToOffset)
 #if RGM_PLATFORM_WINDOWS
     (void)VirtualFree(_arena->m_base, (SIZE_T)end, MEM_DECOMMIT);
 #else
-    (void)madvise(_arena->m_base, (size_t)end, MADV_DONTNEED);
+    (void)madvise(_arena->m_base, (uint64_t)end, MADV_DONTNEED);
 #endif
 }

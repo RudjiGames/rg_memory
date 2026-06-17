@@ -54,7 +54,7 @@
 /* 56 bytes; cache-line aligned at allocation so each node owns one line. */
 typedef struct HashIndexNode
 {
-    uint64_t  m_child[4];  /* absolute child pointers, 0 = NULL. */
+    uint64_t  m_child[4];  /* absolute child pointers, 0 = 0. */
     uint64_t  m_h1;        /* wyhash(key, WYP0) -- descent + fast reject. */
     uint64_t  m_h2;        /* wyhash(key, WYP2) -- terminal equality check. */
     uint64_t  m_value;
@@ -67,9 +67,9 @@ static HashIndexNode* rgm_hash_index_node_create(Arena* _arena,
 {
     HashIndexNode* node = (HashIndexNode*)rgArenaAllocAligned(
         _arena, sizeof(HashIndexNode), RGM_CACHE_LINE);
-    if (node == NULL)
+    if (node == 0)
     {
-        return NULL;
+        return 0;
     }
     node->m_child[0] = 0;
     node->m_child[1] = 0;
@@ -92,7 +92,7 @@ static HashIndexNode* rgm_hash_index_node_create(Arena* _arena,
  * modes. */
 #if RG_HASH_USE_TOP_INDEX
 #  define RGM_HASH_INDEX_DESCEND(_h)   ((_h) << RG_HASH_TOP_BITS)
-#  define RGM_HASH_INDEX_ROOT(_i, _h)  (&(_i)->m_top[(size_t)((_h) >> (64u - RG_HASH_TOP_BITS))])
+#  define RGM_HASH_INDEX_ROOT(_i, _h)  (&(_i)->m_top[(uint64_t)((_h) >> (64u - RG_HASH_TOP_BITS))])
 #else
 #  define RGM_HASH_INDEX_DESCEND(_h)   (_h)
 #  define RGM_HASH_INDEX_ROOT(_i, _h)  (&(_i)->m_root)
@@ -100,13 +100,13 @@ static HashIndexNode* rgm_hash_index_node_create(Arena* _arena,
 
 int32_t rgHashIndexInit(HashIndex* _idx)
 {
-    if (_idx == NULL)
+    if (_idx == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 #if RG_HASH_USE_TOP_INDEX
     /* Zero the 32 KiB top-level index. */
-    size_t i;
+    uint64_t i;
     for (i = 0; i < RG_HASH_TOP_SIZE; ++i)
     {
         _idx->m_top[i] = 0;
@@ -121,7 +121,7 @@ int32_t rgHashIndexInit(HashIndex* _idx)
 int32_t rgHashIndexPutH(HashIndex* restrict _idx, Arena* restrict _arena,
                         uint64_t _h1, uint64_t _h2, uint64_t _value)
 {
-    if (_idx == NULL || _arena == NULL || _arena->m_base == NULL)
+    if (_idx == 0 || _arena == 0 || _arena->m_base == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -136,7 +136,7 @@ int32_t rgHashIndexPutH(HashIndex* restrict _idx, Arena* restrict _arena,
         if (cur == 0)
         {
             HashIndexNode* node = rgm_hash_index_node_create(_arena, _h1, _h2, _value);
-            if (node == NULL)
+            if (node == 0)
             {
                 return RGM_ERROR_ERR_NO_MEMORY;
             }
@@ -174,7 +174,7 @@ int32_t rgHashIndexPutH(HashIndex* restrict _idx, Arena* restrict _arena,
 int32_t rgHashIndexGetH(HashIndex* restrict _idx,
                         uint64_t _h1, uint64_t _h2, uint64_t* restrict _outValue)
 {
-    if (_idx == NULL)
+    if (_idx == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -194,7 +194,7 @@ int32_t rgHashIndexGetH(HashIndex* restrict _idx,
         HashIndexNode* n = (HashIndexNode*)(uintptr_t)cur;
         if (n->m_h1 == _h1 && n->m_h2 == _h2)
         {
-            if (_outValue != NULL)
+            if (_outValue != 0)
             {
                 *_outValue = (uint64_t)rgm_atomic_load_i64(
                                 (const rgm_atomic_i64*)&n->m_value);
@@ -210,10 +210,10 @@ int32_t rgHashIndexGetH(HashIndex* restrict _idx,
 
 /* Byte-key Put: hash key with both functions then dispatch to PutH. */
 int32_t rgHashIndexPut(HashIndex* _idx, Arena* _arena,
-                       const void* _key, size_t _keyLen, uint64_t _value)
+                       const void* _key, uint64_t _keyLen, uint64_t _value)
 {
-    if (_idx == NULL || _arena == NULL || _arena->m_base == NULL
-     || (_key == NULL && _keyLen != 0))
+    if (_idx == 0 || _arena == 0 || _arena->m_base == 0
+     || (_key == 0 && _keyLen != 0))
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -224,9 +224,9 @@ int32_t rgHashIndexPut(HashIndex* _idx, Arena* _arena,
 
 /* Byte-key Get. */
 int32_t rgHashIndexGet(HashIndex* _idx,
-                       const void* _key, size_t _keyLen, uint64_t* _outValue)
+                       const void* _key, uint64_t _keyLen, uint64_t* _outValue)
 {
-    if (_idx == NULL || (_key == NULL && _keyLen != 0))
+    if (_idx == 0 || (_key == 0 && _keyLen != 0))
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -247,8 +247,8 @@ int32_t rgHashIndexPutBatchH(HashIndex* restrict _idx, Arena* restrict _arena,
                              const uint64_t* restrict _values,
                              uint32_t _count)
 {
-    if (_idx == NULL || _arena == NULL || _arena->m_base == NULL
-     || _h1s == NULL || _h2s == NULL || _values == NULL)
+    if (_idx == 0 || _arena == 0 || _arena->m_base == 0
+     || _h1s == 0 || _h2s == 0 || _values == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -270,7 +270,7 @@ int32_t rgHashIndexGetBatchH(HashIndex* restrict _idx,
                              int* restrict _outFound,
                              uint32_t _count)
 {
-    if (_idx == NULL || _h1s == NULL || _h2s == NULL || _outValues == NULL)
+    if (_idx == 0 || _h1s == 0 || _h2s == 0 || _outValues == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -353,7 +353,7 @@ typedef struct rgm_hash_index_iter_frame
 
 uint64_t rgHashIndexForEach(HashIndex* _idx, rgHashIndexForEachFn _fn, void* _userData)
 {
-    if (_idx == NULL || _fn == NULL)
+    if (_idx == 0 || _fn == 0)
     {
         return 0;
     }
@@ -364,7 +364,7 @@ uint64_t rgHashIndexForEach(HashIndex* _idx, rgHashIndexForEachFn _fn, void* _us
 
 #if RG_HASH_USE_TOP_INDEX
     /* Walk every populated top-level subtrie in index order. */
-    size_t top;
+    uint64_t top;
     for (top = 0; top < RG_HASH_TOP_SIZE && !stop; ++top)
     {
         uint64_t rootCur = (uint64_t)rgm_atomic_load_i64(

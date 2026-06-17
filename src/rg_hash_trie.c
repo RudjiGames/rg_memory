@@ -41,7 +41,7 @@
  * identical under both modes. */
 #if RG_HASH_USE_TOP_INDEX
 #  define RGM_HASH_TRIE_DESCEND(_h)   ((_h) << RG_HASH_TOP_BITS)
-#  define RGM_HASH_TRIE_ROOT(_t, _h)  (&(_t)->m_top[(size_t)((_h) >> (64u - RG_HASH_TOP_BITS))])
+#  define RGM_HASH_TRIE_ROOT(_t, _h)  (&(_t)->m_top[(uint64_t)((_h) >> (64u - RG_HASH_TOP_BITS))])
 #else
 #  define RGM_HASH_TRIE_DESCEND(_h)   (_h)
 #  define RGM_HASH_TRIE_ROOT(_t, _h)  (&(_t)->m_root)
@@ -52,14 +52,14 @@
  * HashMap, to re-empty an in-use trie, and to opt into NOCOPY. */
 int32_t rgHashTrieInitEx(HashTrie* _trie, uint32_t _flags)
 {
-    if (_trie == NULL)
+    if (_trie == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 #if RG_HASH_USE_TOP_INDEX
     /* Zero the 32 KiB top-level index. The compiler emits this as memset /
      * rep stosq; it dwarfs the rest of Init but is a one-time cost. */
-    size_t i;
+    uint64_t i;
     for (i = 0; i < RG_HASH_TOP_SIZE; ++i)
     {
         _trie->m_top[i] = 0;
@@ -82,10 +82,10 @@ int32_t rgHashTrieInit(HashTrie* _trie)
  * success synchronises with concurrent Get's acquire-load). On a key
  * match, atomic-store the new value. */
 int32_t rgHashTriePut(HashTrie* restrict _trie, Arena* restrict _arena,
-                      const void* restrict _key, size_t _keyLen, uint64_t _value)
+                      const void* restrict _key, uint64_t _keyLen, uint64_t _value)
 {
-    if (_trie == NULL || _arena == NULL || _arena->m_base == NULL
-     || (_key == NULL && _keyLen != 0))
+    if (_trie == 0 || _arena == 0 || _arena->m_base == 0
+     || (_key == 0 && _keyLen != 0))
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -107,7 +107,7 @@ int32_t rgHashTriePut(HashTrie* restrict _trie, Arena* restrict _arena,
             HashNode* node = nocopy
                 ? rgm_hash_node_create_nocopy(_arena, hfull, _key, _keyLen, _value)
                 : rgm_hash_node_create(_arena, hfull, _key, _keyLen, _value);
-            if (node == NULL)
+            if (node == 0)
             {
                 return RGM_ERROR_ERR_NO_MEMORY;
             }
@@ -156,9 +156,9 @@ int32_t rgHashTriePut(HashTrie* restrict _trie, Arena* restrict _arena,
 /* Lookup. Atomic-acquire-load each slot; the matching CAS on the writer
  * side carries the new node's writes into our view. */
 int32_t rgHashTrieGet(HashTrie* restrict _trie, const void* restrict _key,
-                      size_t _keyLen, uint64_t* restrict _outValue)
+                      uint64_t _keyLen, uint64_t* restrict _outValue)
 {
-    if (_trie == NULL || (_key == NULL && _keyLen != 0))
+    if (_trie == 0 || (_key == 0 && _keyLen != 0))
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -183,7 +183,7 @@ int32_t rgHashTrieGet(HashTrie* restrict _trie, const void* restrict _key,
          && (_keyLen == 0
           || rgm_hash_keys_equal(rgm_hash_node_key_ext(n, nocopy), _key, _keyLen)))
         {
-            if (_outValue != NULL)
+            if (_outValue != 0)
             {
                 *_outValue = (uint64_t)rgm_atomic_load_i64(
                                 (const rgm_atomic_i64*)&n->m_value);
@@ -202,7 +202,7 @@ int32_t rgHashTrieGet(HashTrie* restrict _trie, const void* restrict _key,
 int32_t rgHashTriePutU64(HashTrie* restrict _trie, Arena* restrict _arena,
                          uint64_t _key, uint64_t _value)
 {
-    if (_trie == NULL || _arena == NULL || _arena->m_base == NULL)
+    if (_trie == 0 || _arena == 0 || _arena->m_base == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -218,7 +218,7 @@ int32_t rgHashTriePutU64(HashTrie* restrict _trie, Arena* restrict _arena,
         if (cur == 0)
         {
             HashNode* node = rgm_hash_node_create(_arena, hfull, &_key, sizeof(_key), _value);
-            if (node == NULL)
+            if (node == 0)
             {
                 return RGM_ERROR_ERR_NO_MEMORY;
             }
@@ -252,7 +252,7 @@ int32_t rgHashTriePutU64(HashTrie* restrict _trie, Arena* restrict _arena,
 /* uint64-key specialised Get. */
 int32_t rgHashTrieGetU64(HashTrie* restrict _trie, uint64_t _key, uint64_t* restrict _outValue)
 {
-    if (_trie == NULL)
+    if (_trie == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -275,7 +275,7 @@ int32_t rgHashTrieGetU64(HashTrie* restrict _trie, uint64_t _key, uint64_t* rest
          && n->m_keyLen == 8u
          && rgm_hash_load_u64(rgm_hash_node_key(n)) == _key)
         {
-            if (_outValue != NULL)
+            if (_outValue != 0)
             {
                 *_outValue = (uint64_t)rgm_atomic_load_i64(
                                 (const rgm_atomic_i64*)&n->m_value);
@@ -309,8 +309,8 @@ int32_t rgHashTriePutBatchU64(HashTrie* restrict _trie, Arena* restrict _arena,
                               const uint64_t* restrict _values,
                               uint32_t _count)
 {
-    if (_trie == NULL || _arena == NULL || _arena->m_base == NULL
-     || _keys == NULL || _values == NULL)
+    if (_trie == 0 || _arena == 0 || _arena->m_base == 0
+     || _keys == 0 || _values == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -333,7 +333,7 @@ int32_t rgHashTrieGetBatchU64(HashTrie* restrict _trie,
                               int* restrict _outFound,
                               uint32_t _count)
 {
-    if (_trie == NULL || _keys == NULL || _outValues == NULL)
+    if (_trie == 0 || _keys == 0 || _outValues == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -425,7 +425,7 @@ typedef struct rgm_hash_trie_iter_frame
 
 uint64_t rgHashTrieForEach(HashTrie* _trie, rgHashTrieForEachFn _fn, void* _userData)
 {
-    if (_trie == NULL || _fn == NULL)
+    if (_trie == 0 || _fn == 0)
     {
         return 0;
     }
@@ -438,7 +438,7 @@ uint64_t rgHashTrieForEach(HashTrie* _trie, rgHashTrieForEachFn _fn, void* _user
 #if RG_HASH_USE_TOP_INDEX
     /* Walk every populated top-level subtrie in index order. Each
      * non-empty slot is the root of an independent 4-ary trie. */
-    size_t top;
+    uint64_t top;
     for (top = 0; top < RG_HASH_TOP_SIZE && !stop; ++top)
     {
         uint64_t rootCur = (uint64_t)rgm_atomic_load_i64(

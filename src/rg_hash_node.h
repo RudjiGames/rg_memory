@@ -38,7 +38,7 @@
  * no-hash walk. */
 typedef struct HashNode
 {
-    uint64_t  m_child[4];    /* absolute pointers to children, 0 = NULL.        */
+    uint64_t  m_child[4];    /* absolute pointers to children, 0 = 0.        */
     uint64_t  m_hash;        /* full wyhash digest, for fast-reject in walks.   */
     uint64_t  m_value;       /* opaque 64-bit value (cast pointers via uintptr).*/
     uint32_t  m_keyLen;      /* length of the key in bytes.                     */
@@ -48,7 +48,7 @@ typedef struct HashNode
 
 } HashNode;
 
-/* Pointer to the inline key bytes for a node. NULL key bytes for a
+/* Pointer to the inline key bytes for a node. 0 key bytes for a
  * zero-length key are not allocated; m_keyLen == 0 is the marker. */
 static RGM_FORCEINLINE const uint8_t* rgm_hash_node_key(const HashNode* _node)
 {
@@ -72,11 +72,11 @@ static RGM_FORCEINLINE const uint8_t* rgm_hash_node_key_ext(const HashNode* _nod
 
 /* Byte-equality test for keys. Manual loop to keep the file CRT-free
  * (matches the style of rg_dense_list.c's swap-back copy). */
-static RGM_FORCEINLINE int rgm_hash_keys_equal(const void* _a, const void* _b, size_t _len)
+static RGM_FORCEINLINE int rgm_hash_keys_equal(const void* _a, const void* _b, uint64_t _len)
 {
     const uint8_t* pa = (const uint8_t*)_a;
     const uint8_t* pb = (const uint8_t*)_b;
-    size_t i;
+    uint64_t i;
     for (i = 0; i < _len; ++i)
     {
         if (pa[i] != pb[i])
@@ -89,11 +89,11 @@ static RGM_FORCEINLINE int rgm_hash_keys_equal(const void* _a, const void* _b, s
 
 /* Copy _len bytes from _src to _dst. CRT-free, byte loop; the compiler
  * vectorises it for typical key sizes. */
-static inline void rgm_hash_copy_bytes(void* _dst, const void* _src, size_t _len)
+static inline void rgm_hash_copy_bytes(void* _dst, const void* _src, uint64_t _len)
 {
     uint8_t*       d = (uint8_t*)_dst;
     const uint8_t* s = (const uint8_t*)_src;
-    size_t i;
+    uint64_t i;
     for (i = 0; i < _len; ++i)
     {
         d[i] = s[i];
@@ -102,7 +102,7 @@ static inline void rgm_hash_copy_bytes(void* _dst, const void* _src, size_t _len
 
 /* Allocate a HashNode + inline key bytes in one arena allocation, fill
  * in the fields, zero the child array, set the hash + value. Returns
- * NULL if the arena is exhausted. _keyLen may be zero, in which case
+ * 0 if the arena is exhausted. _keyLen may be zero, in which case
  * only the HashNode itself is allocated.
  *
  * Single-allocation layout means the node carries no offset/handle to
@@ -116,14 +116,14 @@ static inline void rgm_hash_copy_bytes(void* _dst, const void* _src, size_t _len
  * count and the inter-core invalidation traffic under multi-writer Put.
  * Cost is at most 8 B of trailing padding per 0-key node. */
 static inline HashNode* rgm_hash_node_create(Arena* _arena, uint64_t _hash,
-                                             const void* _key, size_t _keyLen,
+                                             const void* _key, uint64_t _keyLen,
                                              uint64_t _value)
 {
-    size_t total = sizeof(HashNode) + _keyLen;
+    uint64_t total = sizeof(HashNode) + _keyLen;
     HashNode* node = (HashNode*)rgArenaAllocAligned(_arena, total, RGM_CACHE_LINE);
-    if (node == NULL)
+    if (node == 0)
     {
-        return NULL;
+        return 0;
     }
 
     node->m_child[0] = 0;
@@ -149,14 +149,14 @@ static inline HashNode* rgm_hash_node_create(Arena* _arena, uint64_t _hash,
  * keys longer than one pointer this is a net memory win -- the node + its
  * key reference fit in one cache line whatever the key length. */
 static inline HashNode* rgm_hash_node_create_nocopy(Arena* _arena, uint64_t _hash,
-                                                    const void* _key, size_t _keyLen,
+                                                    const void* _key, uint64_t _keyLen,
                                                     uint64_t _value)
 {
     HashNode* node = (HashNode*)rgArenaAllocAligned(
         _arena, sizeof(HashNode) + sizeof(const void*), RGM_CACHE_LINE);
-    if (node == NULL)
+    if (node == 0)
     {
-        return NULL;
+        return 0;
     }
 
     node->m_child[0] = 0;

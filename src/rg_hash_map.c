@@ -23,7 +23,7 @@
  *     caller-driven writes through the returned value pointer.
  *
  * Put/Get return an absolute `uint64_t*` pointing at the matched node's
- * value field, or NULL on failure (bad args / not found / arena
+ * value field, or 0 on failure (bad args / not found / arena
  * exhausted). Only the inter-node child references stay as 32-bit offsets
  * to keep node size small; the value pointer handed back to the caller is
  * a plain absolute pointer valid until the host arena is cleared or
@@ -41,7 +41,7 @@
  * because each writer brings its own Arena -- a 32-bit offset has no
  * way to identify which arena a node lives in.
  *
- * A zero-initialised HashMap (m_arena == NULL) is inert: every API
+ * A zero-initialised HashMap (m_arena == 0) is inert: every API
  * call on it is a safe no-op or returns the appropriate error code.
  */
 
@@ -55,7 +55,7 @@
  * trailing pad inside the cache line. */
 typedef struct HashMapNode
 {
-    uint32_t  m_child[4];   /* offsets into m_arena->m_base, 0 = NULL. */
+    uint32_t  m_child[4];   /* offsets into m_arena->m_base, 0 = 0. */
     uint64_t  m_hash;       /* full wyhash digest, for fast-reject in walks. */
     uint64_t  m_value;      /* opaque 64-bit value (cast pointers via uintptr).*/
     uint32_t  m_keyLen;     /* length of the key in bytes. */
@@ -76,25 +76,25 @@ static RGM_FORCEINLINE const uint8_t* rgm_hash_map_node_key(const HashMapNode* _
  *
  * Aligned to 64 bytes (one cache line) so the 8-byte-key common case
  * fits inside one line; trie walks therefore read exactly one line
- * per descent. Returns NULL on arena exhaustion or 4 GiB overflow. */
+ * per descent. Returns 0 on arena exhaustion or 4 GiB overflow. */
 static HashMapNode* rgm_hash_map_node_create(Arena* _arena, uint64_t _hash,
-                                             const void* _key, size_t _keyLen,
+                                             const void* _key, uint64_t _keyLen,
                                              uint32_t* _outOffset)
 {
-    size_t total = sizeof(HashMapNode) + _keyLen;
+    uint64_t total = sizeof(HashMapNode) + _keyLen;
     HashMapNode* node = (HashMapNode*)rgArenaAllocAligned(_arena, total, RGM_CACHE_LINE);
-    if (node == NULL)
+    if (node == 0)
     {
-        return NULL;
+        return 0;
     }
     /* Compute the offset; bail if it would overflow uint32_t (arena
      * is bigger than 4 GiB). The Init-time sentinel allocation ensures
      * the offset is always >= 64, so 0 in *_outOffset cannot collide
      * with "empty slot". */
-    size_t off = (size_t)((uint8_t*)node - _arena->m_base);
+    uint64_t off = (uint64_t)((uint8_t*)node - _arena->m_base);
     if (off > UINT32_MAX)
     {
-        return NULL;
+        return 0;
     }
     *_outOffset = (uint32_t)off;
 
@@ -120,7 +120,7 @@ static HashMapNode* rgm_hash_map_node_create(Arena* _arena, uint64_t _hash,
  * identical under both modes. */
 #if RG_HASH_USE_TOP_INDEX
 #  define RGM_HASH_MAP_DESCEND(_h)   ((_h) << RG_HASH_TOP_BITS)
-#  define RGM_HASH_MAP_ROOT(_m, _h)  (&(_m)->m_top[(size_t)((_h) >> (64u - RG_HASH_TOP_BITS))])
+#  define RGM_HASH_MAP_ROOT(_m, _h)  (&(_m)->m_top[(uint64_t)((_h) >> (64u - RG_HASH_TOP_BITS))])
 #else
 #  define RGM_HASH_MAP_DESCEND(_h)   (_h)
 #  define RGM_HASH_MAP_ROOT(_m, _h)  (&(_m)->m_root)
@@ -132,9 +132,9 @@ static HashMapNode* rgm_hash_map_node_create(Arena* _arena, uint64_t _hash,
 /* A HashMap is "live" once Init has bound it to a live arena. */
 static RGM_FORCEINLINE int rgm_map_is_live(const HashMap* _map)
 {
-    return _map != NULL
-        && _map->m_arena != NULL
-        && _map->m_arena->m_base != NULL;
+    return _map != 0
+        && _map->m_arena != 0
+        && _map->m_arena->m_base != 0;
 }
 
 /* Bind a HashMap to an arena and clear it. On a fresh arena (used == 0),
@@ -144,7 +144,7 @@ static RGM_FORCEINLINE int rgm_map_is_live(const HashMap* _map)
  * (compiler emits memset / rep stosq). */
 int32_t rgHashMapInit(HashMap* _map, Arena* _arena)
 {
-    if (_map == NULL || _arena == NULL || _arena->m_base == NULL)
+    if (_map == 0 || _arena == 0 || _arena->m_base == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -160,7 +160,7 @@ int32_t rgHashMapInit(HashMap* _map, Arena* _arena)
     }
 
 #if RG_HASH_USE_TOP_INDEX
-    size_t i;
+    uint64_t i;
     for (i = 0; i < RG_HASH_TOP_SIZE; ++i)
     {
         _map->m_top[i] = 0;
@@ -202,7 +202,7 @@ typedef struct rgm_hash_map_persist_header
  * (top-index off). One pair of macros so Save/Open are mode-agnostic. */
 #if RG_HASH_USE_TOP_INDEX
 #  define RGM_HASH_MAP_INDEX_PTR(_m)   ((void*)(_m)->m_top)
-#  define RGM_HASH_MAP_INDEX_BYTES     ((size_t)RG_HASH_TOP_SIZE * sizeof(uint32_t))
+#  define RGM_HASH_MAP_INDEX_BYTES     ((uint64_t)RG_HASH_TOP_SIZE * sizeof(uint32_t))
 #  define RGM_HASH_MAP_INDEX_TOPBITS   RG_HASH_TOP_BITS
 #else
 #  define RGM_HASH_MAP_INDEX_PTR(_m)   ((void*)&(_m)->m_root)
@@ -242,11 +242,11 @@ int32_t rgHashMapSave(HashMap* _map)
     else
     {
         void* idx = rgArenaAllocAligned(arena, RGM_HASH_MAP_INDEX_BYTES, 16);
-        if (idx == NULL)
+        if (idx == 0)
         {
             return RGM_ERROR_ERR_NO_MEMORY;
         }
-        size_t off = (size_t)((uint8_t*)idx - base);
+        uint64_t off = (uint64_t)((uint8_t*)idx - base);
         if (off > UINT32_MAX)
         {
             return RGM_ERROR_ERR_NO_MEMORY;
@@ -269,7 +269,7 @@ int32_t rgHashMapSave(HashMap* _map)
 
 int32_t rgHashMapOpen(HashMap* _map, Arena* _arena)
 {
-    if (_map == NULL || _arena == NULL || _arena->m_base == NULL)
+    if (_map == 0 || _arena == 0 || _arena->m_base == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -298,15 +298,15 @@ int32_t rgHashMapOpen(HashMap* _map, Arena* _arena)
 /* Upsert. Walks the trie consuming 2 hash bits per level. On a slot
  * match, returns a pointer to the existing value (untouched). On a slot
  * miss (current == 0), allocates a new node, publishes its offset, and
- * returns a pointer to its zero-initialised value. Returns NULL on bad
+ * returns a pointer to its zero-initialised value. Returns 0 on bad
  * arguments or arena exhaustion. The caller writes the value through the
  * returned pointer. */
 uint64_t* rgHashMapPut(HashMap* restrict _map, const void* restrict _key,
-                       size_t _keyLen)
+                       uint64_t _keyLen)
 {
-    if (!rgm_map_is_live(_map) || (_key == NULL && _keyLen != 0))
+    if (!rgm_map_is_live(_map) || (_key == 0 && _keyLen != 0))
     {
-        return NULL;
+        return 0;
     }
 
     Arena*    arena  = _map->m_arena;
@@ -325,9 +325,9 @@ uint64_t* rgHashMapPut(HashMap* restrict _map, const void* restrict _key,
             uint32_t offset;
             HashMapNode* node = rgm_hash_map_node_create(arena, hfull, _key, _keyLen,
                                                          &offset);
-            if (node == NULL)
+            if (node == 0)
             {
-                return NULL;
+                return 0;
             }
             *slot = offset;
             return &node->m_value;
@@ -351,14 +351,14 @@ uint64_t* rgHashMapPut(HashMap* restrict _map, const void* restrict _key,
     }
 }
 
-/* Lookup. Same walk; returns a pointer to the value on hit, NULL on
+/* Lookup. Same walk; returns a pointer to the value on hit, 0 on
  * miss (or bad arguments). */
 uint64_t* rgHashMapGet(HashMap* restrict _map, const void* restrict _key,
-                       size_t _keyLen)
+                       uint64_t _keyLen)
 {
-    if (!rgm_map_is_live(_map) || (_key == NULL && _keyLen != 0))
+    if (!rgm_map_is_live(_map) || (_key == 0 && _keyLen != 0))
     {
-        return NULL;
+        return 0;
     }
 
     uint8_t* base  = _map->m_arena->m_base;
@@ -380,18 +380,18 @@ uint64_t* rgHashMapGet(HashMap* restrict _map, const void* restrict _key,
         h <<= 2;
         if (h == 0) { h = rgm_hash_reseed_bytes(_key, _keyLen, ++round); }
     }
-    return NULL;
+    return 0;
 }
 
 /* uint64-key specialised upsert. Inlined hash + single uint64 == key
  * match replaces the byte loop the generic path uses. Returns a pointer
  * to the value (zero-initialised on insert, existing value untouched on
- * match), or NULL on bad arguments / arena exhaustion. */
+ * match), or 0 on bad arguments / arena exhaustion. */
 uint64_t* rgHashMapPutU64(HashMap* restrict _map, uint64_t _key)
 {
     if (!rgm_map_is_live(_map))
     {
-        return NULL;
+        return 0;
     }
 
     Arena*   arena = _map->m_arena;
@@ -409,9 +409,9 @@ uint64_t* rgHashMapPutU64(HashMap* restrict _map, uint64_t _key)
             uint32_t offset;
             HashMapNode* node = rgm_hash_map_node_create(arena, hfull, &_key, sizeof(_key),
                                                          &offset);
-            if (node == NULL)
+            if (node == 0)
             {
-                return NULL;
+                return 0;
             }
             *slot = offset;
             return &node->m_value;
@@ -432,12 +432,12 @@ uint64_t* rgHashMapPutU64(HashMap* restrict _map, uint64_t _key)
 }
 
 /* uint64-key specialised Get. Returns a pointer to the value on hit,
- * NULL on miss (or bad arguments). */
+ * 0 on miss (or bad arguments). */
 uint64_t* rgHashMapGetU64(HashMap* restrict _map, uint64_t _key)
 {
     if (!rgm_map_is_live(_map))
     {
-        return NULL;
+        return 0;
     }
 
     uint8_t* base  = _map->m_arena->m_base;
@@ -459,7 +459,7 @@ uint64_t* rgHashMapGetU64(HashMap* restrict _map, uint64_t _key)
         h <<= 2;
         if (h == 0) { h = rgm_hash_reseed_u64(_key, ++round); }
     }
-    return NULL;
+    return 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -480,8 +480,8 @@ int32_t rgHashMapPutBatchU64(HashMap* restrict _map,
                              const uint64_t* restrict _values,
                              uint32_t _count)
 {
-    if (_map == NULL || _map->m_arena == NULL || _map->m_arena->m_base == NULL
-     || _keys == NULL || _values == NULL)
+    if (_map == 0 || _map->m_arena == 0 || _map->m_arena->m_base == 0
+     || _keys == 0 || _values == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -489,9 +489,9 @@ int32_t rgHashMapPutBatchU64(HashMap* restrict _map,
     uint32_t i;
     for (i = 0; i < _count; ++i)
     {
-        /* Args are validated above, so a NULL here means arena exhaustion. */
+        /* Args are validated above, so a 0 here means arena exhaustion. */
         uint64_t* slot = rgHashMapPutU64(_map, _keys[i]);
-        if (slot == NULL)
+        if (slot == 0)
         {
             return RGM_ERROR_ERR_NO_MEMORY;
         }
@@ -506,8 +506,8 @@ int32_t rgHashMapGetBatchU64(HashMap* restrict _map,
                              int* restrict _outFound,
                              uint32_t _count)
 {
-    if (_map == NULL || _map->m_arena == NULL || _map->m_arena->m_base == NULL
-     || _keys == NULL || _outValues == NULL)
+    if (_map == 0 || _map->m_arena == 0 || _map->m_arena->m_base == 0
+     || _keys == 0 || _outValues == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -597,8 +597,8 @@ typedef struct rgm_hash_iter_frame
 
 uint64_t rgHashMapForEach(HashMap* _map, rgHashMapForEachFn _fn, void* _userData)
 {
-    if (_map == NULL || _map->m_arena == NULL || _map->m_arena->m_base == NULL
-     || _fn == NULL)
+    if (_map == 0 || _map->m_arena == 0 || _map->m_arena->m_base == 0
+     || _fn == 0)
     {
         return 0;
     }
@@ -610,7 +610,7 @@ uint64_t rgHashMapForEach(HashMap* _map, rgHashMapForEachFn _fn, void* _userData
 
 #if RG_HASH_USE_TOP_INDEX
     /* Walk every populated top-level subtrie in index order. */
-    size_t top;
+    uint64_t top;
     for (top = 0; top < RG_HASH_TOP_SIZE && !stop; ++top)
     {
         uint32_t rootCur = _map->m_top[top];

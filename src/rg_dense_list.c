@@ -33,11 +33,11 @@
 
 /* Error codes (RGM_ERROR_*) are declared in rg_memory.h and shared with FreeList. */
 
-/* A DenseList with m_buffer == NULL is treated as uninitialised: queries
- * report zero, Alloc returns NULL, Free / Clear do nothing. */
+/* A DenseList with m_buffer == 0 is treated as uninitialised: queries
+ * report zero, Alloc returns 0, Free / Clear do nothing. */
 static int rgm_denselist_is_live(const DenseList* _dl)
 {
-    return _dl != NULL && _dl->m_buffer != NULL;
+    return _dl != 0 && _dl->m_buffer != 0;
 }
 
 /* Round up to a multiple of 16 so block N is 16-byte aligned for every
@@ -45,13 +45,13 @@ static int rgm_denselist_is_live(const DenseList* _dl)
  * since DenseList stores no per-block metadata. Returns 0 on overflow
  * / bad input (also when the rounded result would not fit in uint32_t,
  * the type used for m_blockSize). */
-static size_t rgm_denselist_effective_block_size(size_t _blockSize)
+static uint64_t rgm_denselist_effective_block_size(uint64_t _blockSize)
 {
     if (_blockSize == 0)
     {
         _blockSize = 1;
     }
-    _blockSize = (_blockSize + 15u) & ~(size_t)15u;
+    _blockSize = (_blockSize + 15u) & ~(uint64_t)15u;
     if (_blockSize == 0 || _blockSize > 0xFFFFFFFFu)
     {
         return 0;
@@ -60,7 +60,7 @@ static size_t rgm_denselist_effective_block_size(size_t _blockSize)
 }
 
 /* Wire up *_dl. Caller has already validated the inputs: _buffer
- * non-NULL, _blockSize the clamped effective size, _maxBlocks non-zero. */
+ * non-0, _blockSize the clamped effective size, _maxBlocks non-zero. */
 static void rgm_denselist_install(DenseList* _dl, uint8_t* _buffer,
                                   uint32_t _blockSize, uint32_t _maxBlocks)
 {
@@ -73,13 +73,13 @@ static void rgm_denselist_install(DenseList* _dl, uint8_t* _buffer,
 /* ------------------------------------------------------------------------- */
 
 /* Return the post-round-up buffer requirement, or 0 on overflow / zero input. */
-size_t rgDenseListBufferSize(size_t _blockSize, uint32_t _maxBlocks)
+uint64_t rgDenseListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks)
 {
     if (_maxBlocks == 0)
     {
         return 0;
     }
-    size_t bs = rgm_denselist_effective_block_size(_blockSize);
+    uint64_t bs = rgm_denselist_effective_block_size(_blockSize);
     if (bs == 0 || bs > SIZE_MAX / _maxBlocks)
     {
         return 0;
@@ -89,14 +89,14 @@ size_t rgDenseListBufferSize(size_t _blockSize, uint32_t _maxBlocks)
 
 /* Populate *_list with an arena-backed block buffer. */
 int32_t rgDenseListCreate(Arena* _arena, DenseList* _list,
-                          size_t _blockSize, uint32_t _maxBlocks)
+                          uint64_t _blockSize, uint32_t _maxBlocks)
 {
-    if (_list == NULL || _maxBlocks == 0)
+    if (_list == 0 || _maxBlocks == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 
-    size_t bs = rgm_denselist_effective_block_size(_blockSize);
+    uint64_t bs = rgm_denselist_effective_block_size(_blockSize);
     if (bs == 0 || bs > SIZE_MAX / _maxBlocks)
     {
         return RGM_ERROR_ERR_OVERFLOW;
@@ -104,7 +104,7 @@ int32_t rgDenseListCreate(Arena* _arena, DenseList* _list,
 
     /* Same arena-vs-OOM disambiguation as rgFreeListCreate. */
     uint8_t* buffer = (uint8_t*)rgArenaAlloc(_arena, bs * _maxBlocks);
-    if (buffer == NULL)
+    if (buffer == 0)
     {
         return rgArenaIsValid(_arena) ? RGM_ERROR_ERR_NO_MEMORY
                                       : RGM_ERROR_ERR_INVALID;
@@ -115,16 +115,16 @@ int32_t rgDenseListCreate(Arena* _arena, DenseList* _list,
 }
 
 /* Populate *_list using caller-owned _buffer; caller retains ownership. */
-int32_t rgDenseListCreateFromMemory(void* _buffer, size_t _bufferSize,
+int32_t rgDenseListCreateFromMemory(void* _buffer, uint64_t _bufferSize,
                                     DenseList* _list,
-                                    size_t _blockSize, uint32_t _maxBlocks)
+                                    uint64_t _blockSize, uint32_t _maxBlocks)
 {
-    if (_list == NULL || _buffer == NULL || _maxBlocks == 0)
+    if (_list == 0 || _buffer == 0 || _maxBlocks == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 
-    size_t bs = rgm_denselist_effective_block_size(_blockSize);
+    uint64_t bs = rgm_denselist_effective_block_size(_blockSize);
     if (bs == 0 || bs > SIZE_MAX / _maxBlocks)
     {
         return RGM_ERROR_ERR_OVERFLOW;
@@ -151,14 +151,14 @@ void rgDenseListClear(DenseList* _list)
     }
 }
 
-/* Return slot m_count and bump it; NULL when the list is full or inert. */
+/* Return slot m_count and bump it; 0 when the list is full or inert. */
 void* rgDenseListAlloc(DenseList* _list)
 {
     if (!rgm_denselist_is_live(_list) || _list->m_count >= _list->m_maxBlocks)
     {
-        return NULL;
+        return 0;
     }
-    void* slot = _list->m_buffer + (size_t)_list->m_count * _list->m_blockSize;
+    void* slot = _list->m_buffer + (uint64_t)_list->m_count * _list->m_blockSize;
     ++_list->m_count;
     return slot;
 }
@@ -172,7 +172,7 @@ void rgDenseListFree(DenseList* _list, void* _ptr)
     }
 
     uint8_t* last = _list->m_buffer
-                  + (size_t)(_list->m_count - 1u) * _list->m_blockSize;
+                  + (uint64_t)(_list->m_count - 1u) * _list->m_blockSize;
 
     /* Debug-only: validate _ptr lies on a block boundary inside the
      * live range. In release we trust the caller. */
@@ -203,23 +203,23 @@ void rgDenseListFree(DenseList* _list, void* _ptr)
 /* Base pointer of the live region; pair with Count and BlockSize for iteration. */
 void* rgDenseListData(DenseList* _list)
 {
-    return rgm_denselist_is_live(_list) ? _list->m_buffer : NULL;
+    return rgm_denselist_is_live(_list) ? _list->m_buffer : 0;
 }
 
-/* Pointer to slot _index, or NULL when _index >= m_count / inert. */
+/* Pointer to slot _index, or 0 when _index >= m_count / inert. */
 void* rgDenseListAt(DenseList* _list, uint32_t _index)
 {
     if (!rgm_denselist_is_live(_list) || _index >= _list->m_count)
     {
-        return NULL;
+        return 0;
     }
-    return _list->m_buffer + (size_t)_index * _list->m_blockSize;
+    return _list->m_buffer + (uint64_t)_index * _list->m_blockSize;
 }
 
 /* Slot index of _ptr in [0, m_maxBlocks), or UINT32_MAX when out of the buffer. */
 uint32_t rgDenseListIndexOf(DenseList* _list, void* _ptr)
 {
-    if (!rgm_denselist_is_live(_list) || _ptr == NULL)
+    if (!rgm_denselist_is_live(_list) || _ptr == 0)
     {
         return UINT32_MAX;
     }

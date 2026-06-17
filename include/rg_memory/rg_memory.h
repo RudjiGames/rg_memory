@@ -8,7 +8,6 @@
 #define RG_MEMORY_H_HEADER_GUARD
 
 #include <stdint.h> /* uint*_t */
-#include <stddef.h> /* size_t  */
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +23,7 @@ extern "C" {
      * embedded inside another struct). rgArenaCreate populates it in place;
      * rgArenaDestroy releases the VM reservation it owns. A zero-initialised
      * Arena is treated as uninitialised and every API call on it is a safe
-     * no-op (Alloc returns NULL, queries return 0, Destroy does nothing).
+     * no-op (Alloc returns 0, queries return 0, Destroy does nothing).
      *
      * Each live Arena owns a VM reservation; do not copy or memcpy a live
      * Arena struct -- both copies would refer to the same reservation and
@@ -36,7 +35,7 @@ extern "C" {
      */
     typedef struct Arena
     {
-        uint8_t*    m_base;      /* NULL marks the Arena as uninitialised. */
+        uint8_t*    m_base;      /* 0 marks the Arena as uninitialised. */
         uint64_t    m_reserved;  /* total reserved bytes (page-aligned).   */
         uint64_t    m_committed; /* bytes currently committed              */
                                  /* (page-aligned; grows lazily).          */
@@ -56,7 +55,7 @@ extern "C" {
      * matching Destroy because the library owns no resources tied to
      * the struct itself. A zero-initialised FreeList is treated as
      * uninitialised and every API call on it is a safe no-op
-     * (Alloc returns NULL, Free does nothing, size queries return 0).
+     * (Alloc returns 0, Free does nothing, size queries return 0).
      *
      * Treat the fields as private to the implementation; do not read
      * or mutate them directly.
@@ -66,8 +65,8 @@ extern "C" {
         uint32_t    m_maxBlocks;
         uint32_t    m_blockSize;
         uint32_t    m_blocksFree;
-        uint8_t*    m_buffer;       /* NULL marks the FreeList as uninitialised. */
-        uint8_t*    m_next;         /* Head of free chain, or NULL when empty.   */
+        uint8_t*    m_buffer;       /* 0 marks the FreeList as uninitialised. */
+        uint8_t*    m_next;         /* Head of free chain, or 0 when empty.   */
 
     } FreeList;
 
@@ -92,7 +91,7 @@ extern "C" {
         uint32_t    m_maxBlocks;
         uint32_t    m_blockSize;
         uint32_t    m_count;        /* live blocks, occupying [0, m_count). */
-        uint8_t*    m_buffer;       /* NULL marks the DenseList as uninitialised. */
+        uint8_t*    m_buffer;       /* 0 marks the DenseList as uninitialised. */
 
     } DenseList;
 
@@ -128,7 +127,7 @@ extern "C" {
         uint64_t    m_blockMask;    /* m_blockCount - 1 (power of two), fast h&mask. */
         uint32_t    m_blockCount;   /* number of 512-bit blocks; bit array is m_blockCount * 8 uint64s. */
         uint32_t    m_hashCount;    /* k -- number of bit positions per Add / Test, all inside the chosen block. */
-        uint64_t*   m_bits;         /* NULL marks the BloomFilter uninitialised. */
+        uint64_t*   m_bits;         /* 0 marks the BloomFilter uninitialised. */
 
     } BloomFilter;
 
@@ -166,7 +165,7 @@ extern "C" {
     /* Hash map (single-threaded), 4-ary hash trie backed by an arena.
      *
      * Stores arbitrary byte-keys mapped to opaque 64-bit values. Slots
-     * hold 32-bit offsets into the host arena's m_base (NULL = 0). The
+     * hold 32-bit offsets into the host arena's m_base (0 = 0). The
      * encoding caps the host arena at 4 GiB, but halves the size of
      * every slot vs the 64-bit-absolute-pointer scheme used by HashTrie
      * and HashIndex -- the m_top array drops from 32 KiB to 16 KiB and
@@ -177,7 +176,7 @@ extern "C" {
      * unambiguously mean "empty slot" everywhere a slot is read.
      *
      * Caller-owned: place the struct anywhere; rgHashMapInit binds it to
-     * an arena. A zero-initialised HashMap (m_arena == NULL) is treated
+     * an arena. A zero-initialised HashMap (m_arena == 0) is treated
      * as uninitialised and every API call on it is a safe no-op.
      *
      * Sizable: the inline m_top array is 16 KiB on the default
@@ -190,7 +189,7 @@ extern "C" {
      */
     typedef struct HashMap
     {
-        Arena*        m_arena;                  /* host arena; NULL marks the HashMap uninit. */
+        Arena*        m_arena;                  /* host arena; 0 marks the HashMap uninit. */
 #if RG_HASH_USE_TOP_INDEX
         uint32_t      m_top[RG_HASH_TOP_SIZE];  /* direct-mapped top-level roots (arena offsets), 0 = empty. */
 #else
@@ -268,7 +267,7 @@ extern "C" {
      */
     typedef uint64_t ArenaSavePoint;
 
-    /* Sentinel returned by rgArenaSave for a NULL or uninitialised arena.
+    /* Sentinel returned by rgArenaSave for a 0 or uninitialised arena.
      * Compares unequal to any save point a live arena can produce (no arena
      * can fill the entire 64-bit address space). Passing this value to
      * rgArenaRestore is a no-op. */
@@ -276,7 +275,7 @@ extern "C" {
 
     /* Error codes returned by the Create variants.
      *   0     : success
-     *  -1     : invalid argument (NULL out, NULL buffer, zero size/blocks)
+     *  -1     : invalid argument (0 out, 0 buffer, zero size/blocks)
      *  -2     : size overflow
      *  -3     : out of memory (VM reservation failed, or arena exhausted)
      *  -4     : caller buffer too small
@@ -326,10 +325,10 @@ extern "C" {
      * but only commits physical pages as allocations advance the bump pointer,
      * so a large reservation is cheap.
      *
-     * @param[out] _arena     - Arena to initialise. Must be non-NULL.
+     * @param[out] _arena     - Arena to initialise. Must be non-0.
      * @param[in]  _arenaSize - Total size, in bytes, to reserve for the arena.
      * @returns 0 on success, or a negative error code on failure:
-     *           -1 invalid argument (NULL _arena, zero _arenaSize),
+     *           -1 invalid argument (0 _arena, zero _arenaSize),
      *           -3 OS rejected the reservation.
      *          On failure *_arena is left unchanged.
      */
@@ -346,7 +345,7 @@ extern "C" {
      * library falls back to the equivalent normal-pages path when the OS
      * refuses the hint.
      *
-     * @param[out] _arena     - Arena to initialise. Must be non-NULL.
+     * @param[out] _arena     - Arena to initialise. Must be non-0.
      * @param[in]  _arenaSize - Total size, in bytes, to reserve.
      * @param[in]  _flags     - Bitwise OR of RGM_ARENA_FLAG_* values.
      * @returns Same codes as rgArenaCreate.
@@ -375,7 +374,7 @@ extern "C" {
      * Caveat: the on-disk layout is build-specific (host endianness and the
      * RG_HASH_* configuration). Files are not portable across architectures.
      *
-     * @param[out] _arena     - Arena to initialise. Must be non-NULL.
+     * @param[out] _arena     - Arena to initialise. Must be non-0.
      * @param[in]  _path      - Filesystem path for the backing file.
      * @param[in]  _arenaSize - File / mapping size in bytes (page-rounded).
      * @returns 0 on success, -1 invalid argument, -5 on file/mapping failure.
@@ -396,7 +395,7 @@ extern "C" {
      * Use this for scratch / spill files that must not outlive the process;
      * use rgArenaCreateShared for files meant to persist (e.g. on-disk maps).
      *
-     * @param[out] _arena     - Arena to initialise. Must be non-NULL.
+     * @param[out] _arena     - Arena to initialise. Must be non-0.
      * @param[in]  _path      - Filesystem path for the backing temp file.
      * @param[in]  _arenaSize - File / mapping size in bytes (page-rounded).
      * @returns 0 on success, -1 invalid argument, -5 on file/mapping failure.
@@ -411,7 +410,7 @@ extern "C" {
      * appended to. For a read-only consumer pass _readOnly != 0 (writes to
      * the mapping then fault).
      *
-     * @param[out] _arena    - Arena to initialise. Must be non-NULL.
+     * @param[out] _arena    - Arena to initialise. Must be non-0.
      * @param[in]  _path     - Path to a file previously created shared.
      * @param[in]  _readOnly - Non-zero maps read-only; zero maps read/write.
      * @returns 0 on success, -1 invalid argument, -5 on file/mapping failure.
@@ -429,7 +428,7 @@ extern "C" {
     /* Test whether an Arena is initialised and live.
      *
      * @param[in] _arena - Arena to test.
-     * @returns 1 if _arena is non-NULL and currently holds a live VM
+     * @returns 1 if _arena is non-0 and currently holds a live VM
      *          reservation, 0 otherwise.
      */
     int rgArenaIsValid(Arena* _arena);
@@ -438,7 +437,7 @@ extern "C" {
      *
      * Sets *_arena to the uninitialised state so subsequent API calls
      * become safe no-ops. Idempotent: a second Destroy on the same Arena
-     * is a no-op. No-op when _arena is NULL.
+     * is a no-op. No-op when _arena is 0.
      *
      * @param[in] _arena - Arena to destroy.
      */
@@ -448,7 +447,7 @@ extern "C" {
      *
      * All allocations made from the arena become invalid, but the underlying
      * memory reservation is kept alive for subsequent allocations. No-op
-     * when _arena is NULL or uninitialised.
+     * when _arena is 0 or uninitialised.
      *
      * @param[in] _arena - Arena to clear.
      */
@@ -458,19 +457,19 @@ extern "C" {
      *
      * @param[in] _arena - Arena to allocate from.
      * @param[in] _size  - Number of bytes to allocate.
-     * @returns Pointer to the allocated block, or NULL when the arena is
-     *          exhausted, _arena is NULL or uninitialised, or _size is zero.
+     * @returns Pointer to the allocated block, or 0 when the arena is
+     *          exhausted, _arena is 0 or uninitialised, or _size is zero.
      */
-    void* rgArenaAlloc(Arena* _arena, size_t _size);
+    void* rgArenaAlloc(Arena* _arena, uint64_t _size);
 
     /* Allocate an aligned block of memory from the arena.
      *
      * @param[in] _arena     - Arena to allocate from.
      * @param[in] _size      - Number of bytes to allocate.
      * @param[in] _alignment - Required alignment, in bytes. Must be a power of two.
-     * @returns Pointer to the allocated block, or NULL on failure.
+     * @returns Pointer to the allocated block, or 0 on failure.
      */
-    void* rgArenaAllocAligned(Arena* _arena, size_t _size, size_t _alignment);
+    void* rgArenaAllocAligned(Arena* _arena, uint64_t _size, uint64_t _alignment);
 
     /* Pop the most recent allocation off the arena by size.
      *
@@ -485,7 +484,7 @@ extern "C" {
      * @param[in] _arena - Arena that owns the allocation.
      * @param[in] _size  - Number of bytes to rewind. Must match the alloc.
      */
-    void rgArenaPop(Arena* _arena, size_t _size);
+    void rgArenaPop(Arena* _arena, uint64_t _size);
 
     /* Pop the most recent aligned allocation off the arena by size.
      *
@@ -496,7 +495,7 @@ extern "C" {
      * @param[in] _size      - Number of bytes to rewind. Must match the alloc.
      * @param[in] _alignment - Alignment passed to the original alloc.
      */
-    void rgArenaPopAligned(Arena* _arena, size_t _size, size_t _alignment);
+    void rgArenaPopAligned(Arena* _arena, uint64_t _size, uint64_t _alignment);
 
     /* Capture the arena's current allocation high-water mark.
      *
@@ -507,7 +506,7 @@ extern "C" {
      *
      * @param[in] _arena - Arena to snapshot.
      * @returns Current pos as a save point, or RGM_ARENA_INVALID_SAVE_POINT
-     *          when _arena is NULL or uninitialised. A freshly created
+     *          when _arena is 0 or uninitialised. A freshly created
      *          (empty) arena returns 0, distinct from the sentinel.
      */
     ArenaSavePoint rgArenaSave(Arena* _arena);
@@ -532,7 +531,7 @@ extern "C" {
      * @param[in] _arena - Arena to query.
      * @returns Number of bytes currently allocated from _arena, including
      *          any alignment padding inserted by previous allocations.
-     *          Returns 0 when _arena is NULL or uninitialised.
+     *          Returns 0 when _arena is 0 or uninitialised.
      */
     uint64_t rgArenaUsed(Arena* _arena);
 
@@ -541,7 +540,7 @@ extern "C" {
      * @param[in] _arena - Arena to query.
      * @returns Total bytes of virtual address space reserved for _arena
      *          (page-aligned, may exceed the size requested at create time).
-     *          Returns 0 when _arena is NULL or uninitialised.
+     *          Returns 0 when _arena is 0 or uninitialised.
      */
     uint64_t rgArenaCapacity(Arena* _arena);
 
@@ -557,7 +556,7 @@ extern "C" {
      * Rounds the new committed boundary up to the OS page size, so the
      * page containing the current high-water mark is kept committed.
      *
-     * No-op when _arena is NULL, uninitialised, or when nothing above
+     * No-op when _arena is 0, uninitialised, or when nothing above
      * the current high-water mark is committed. No-op when the OS
      * refuses the decommit (e.g. eager-commit huge pages on Windows
      * that cannot be partially decommitted) -- the arena keeps working.
@@ -578,7 +577,7 @@ extern "C" {
      *   - Windows : VirtualFree(base, len, MEM_DECOMMIT)
      *   - POSIX   : madvise(base, len, MADV_DONTNEED)
      *
-     * No-op on NULL/uninitialised/file-backed arenas, or when nothing is fully consumed yet.
+     * No-op on 0/uninitialised/file-backed arenas, or when nothing is fully consumed yet.
      *
      * @param[in] _arena      - Arena whose front pages to release.
      * @param[in] _upToOffset - Bytes from the base that have been consumed; pages wholly below
@@ -602,18 +601,18 @@ extern "C" {
      * of 16 so block N inherits the arena's 16-byte alignment for all N.
      *
      * @param[in]  _arena      - Arena to allocate the block buffer from.
-     * @param[out] _list       - FreeList to initialise. Must be non-NULL.
+     * @param[out] _list       - FreeList to initialise. Must be non-0.
      * @param[in]  _blockSize  - Block size, in bytes.
      * @param[in]  _maxBlocks  - Maximum number of blocks in the list.
      * @returns 0 on success, or a negative error code on failure:
-     *           -1 invalid argument (NULL _list, NULL / uninitialised _arena,
+     *           -1 invalid argument (0 _list, 0 / uninitialised _arena,
      *              zero _maxBlocks),
      *           -2 size overflow,
      *           -3 arena exhausted.
      *          On failure *_list is left unchanged.
      */
     int32_t rgFreeListCreate(Arena* _arena, FreeList* _list,
-                             size_t _blockSize, uint32_t _maxBlocks);
+                             uint64_t _blockSize, uint32_t _maxBlocks);
 
     /* Create a fixed-block free list using a caller-owned memory buffer.
      *
@@ -633,17 +632,17 @@ extern "C" {
      *
      * @param[in]  _buffer     - Caller-owned, 16-byte-aligned memory.
      * @param[in]  _bufferSize - Size of _buffer, in bytes.
-     * @param[out] _list       - FreeList to initialise. Must be non-NULL.
+     * @param[out] _list       - FreeList to initialise. Must be non-0.
      * @param[in]  _blockSize  - Block size, in bytes.
      * @param[in]  _maxBlocks  - Maximum number of blocks in the list.
      * @returns 0 on success, or a negative error code on failure:
-     *           -1 invalid argument (NULL _buffer, NULL _list, zero _maxBlocks),
+     *           -1 invalid argument (0 _buffer, 0 _list, zero _maxBlocks),
      *           -2 size overflow,
      *           -4 _bufferSize is smaller than the effective layout requires.
      *          On failure *_list is left unchanged.
      */
-    int32_t rgFreeListCreateFromMemory(void* _buffer, size_t _bufferSize, FreeList* _list,
-                                       size_t _blockSize, uint32_t _maxBlocks);
+    int32_t rgFreeListCreateFromMemory(void* _buffer, uint64_t _bufferSize, FreeList* _list,
+                                       uint64_t _blockSize, uint32_t _maxBlocks);
 
     /* Compute the buffer size rgFreeListCreateFromMemory would require.
      *
@@ -655,20 +654,20 @@ extern "C" {
      * @param[in] _maxBlocks  - Maximum number of blocks in the list.
      * @returns Required buffer size in bytes, or 0 on overflow / zero input.
      */
-    size_t rgFreeListBufferSize(size_t _blockSize, uint32_t _maxBlocks);
+    uint64_t rgFreeListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks);
 
     /* Allocate one fixed-size block from the free list.
      *
      * @param[in] _list - Free list to allocate from.
      * @returns Pointer to a block of rgFreeListBlockSize(_list) bytes,
-     *          or NULL when the list is exhausted, _list is NULL, or
+     *          or 0 when the list is exhausted, _list is 0, or
      *          _list is uninitialised (zero-initialised struct).
      */
     void* rgFreeListAlloc(FreeList* _list);
 
     /* Return a block to the free list.
      *
-     * No-op when _list is NULL or uninitialised.
+     * No-op when _list is 0 or uninitialised.
      *
      * @param[in] _list - Free list that owns the block.
      * @param[in] _ptr  - Pointer previously returned by rgFreeListAlloc on
@@ -686,14 +685,14 @@ extern "C" {
      * @param[in] _list - Free list to query.
      * @param[in] _ptr  - Pointer to test.
      * @returns 1 if _ptr lies within the list's block buffer, 0 otherwise
-     *          (including when _list is NULL or uninitialised).
+     *          (including when _list is 0 or uninitialised).
      */
     int rgFreeListCheckPtr(FreeList* _list, void* _ptr);
 
     /* Report the maximum number of blocks the free list was created with.
      *
      * @param[in] _list - Free list to query.
-     * @returns The configured block count, or 0 if _list is NULL or
+     * @returns The configured block count, or 0 if _list is 0 or
      *          uninitialised.
      */
     uint32_t rgFreeListMaxBlocks(FreeList* _list);
@@ -705,7 +704,7 @@ extern "C" {
      * a multiple of 16. It may exceed the value originally passed to Create.
      *
      * @param[in] _list - Free list to query.
-     * @returns The effective block size in bytes, or 0 if _list is NULL
+     * @returns The effective block size in bytes, or 0 if _list is 0
      *          or uninitialised.
      */
     uint32_t rgFreeListBlockSize(FreeList* _list);
@@ -713,7 +712,7 @@ extern "C" {
     /* Report the number of blocks currently available for allocation.
      *
      * @param[in] _list - Free list to query.
-     * @returns The count of unallocated blocks, or 0 if _list is NULL
+     * @returns The count of unallocated blocks, or 0 if _list is 0
      *          or uninitialised.
      */
     uint32_t rgFreeListBlocksFree(FreeList* _list);
@@ -735,18 +734,18 @@ extern "C" {
      * stash chain links in each free block).
      *
      * @param[in]  _arena      - Arena to allocate the block buffer from.
-     * @param[out] _list       - DenseList to initialise. Must be non-NULL.
+     * @param[out] _list       - DenseList to initialise. Must be non-0.
      * @param[in]  _blockSize  - Block size, in bytes.
      * @param[in]  _maxBlocks  - Maximum number of blocks in the list.
      * @returns 0 on success, or a negative error code on failure:
-     *           -1 invalid argument (NULL _list, NULL / uninitialised _arena,
+     *           -1 invalid argument (0 _list, 0 / uninitialised _arena,
      *              zero _maxBlocks),
      *           -2 size overflow,
      *           -3 arena exhausted.
      *          On failure *_list is left unchanged.
      */
     int32_t rgDenseListCreate(Arena* _arena, DenseList* _list,
-                              size_t _blockSize, uint32_t _maxBlocks);
+                              uint64_t _blockSize, uint32_t _maxBlocks);
 
     /* Create a dense-packed pool using a caller-owned memory buffer.
      *
@@ -765,18 +764,18 @@ extern "C" {
      *
      * @param[in]  _buffer     - Caller-owned, 16-byte-aligned memory.
      * @param[in]  _bufferSize - Size of _buffer, in bytes.
-     * @param[out] _list       - DenseList to initialise. Must be non-NULL.
+     * @param[out] _list       - DenseList to initialise. Must be non-0.
      * @param[in]  _blockSize  - Block size, in bytes.
      * @param[in]  _maxBlocks  - Maximum number of blocks in the list.
      * @returns 0 on success, or a negative error code on failure:
-     *           -1 invalid argument (NULL _buffer, NULL _list, zero _maxBlocks),
+     *           -1 invalid argument (0 _buffer, 0 _list, zero _maxBlocks),
      *           -2 size overflow,
      *           -4 _bufferSize is smaller than the effective layout requires.
      *          On failure *_list is left unchanged.
      */
-    int32_t rgDenseListCreateFromMemory(void* _buffer, size_t _bufferSize,
+    int32_t rgDenseListCreateFromMemory(void* _buffer, uint64_t _bufferSize,
                                         DenseList* _list,
-                                        size_t _blockSize, uint32_t _maxBlocks);
+                                        uint64_t _blockSize, uint32_t _maxBlocks);
 
     /* Compute the buffer size rgDenseListCreateFromMemory would require.
      *
@@ -787,13 +786,13 @@ extern "C" {
      * @param[in] _maxBlocks  - Maximum number of blocks in the list.
      * @returns Required buffer size in bytes, or 0 on overflow / zero input.
      */
-    size_t rgDenseListBufferSize(size_t _blockSize, uint32_t _maxBlocks);
+    uint64_t rgDenseListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks);
 
     /* Reset the live count to zero in O(1).
      *
      * The block buffer is left as-is; subsequent Allocs will overwrite
      * old contents. Cheaper than re-creating the list. No-op when
-     * _list is NULL or uninitialised.
+     * _list is 0 or uninitialised.
      *
      * @param[in] _list - DenseList to clear.
      */
@@ -806,7 +805,7 @@ extern "C" {
      *
      * @param[in] _list - DenseList to allocate from.
      * @returns Pointer to a block of rgDenseListBlockSize(_list) bytes,
-     *          or NULL when the list is full, _list is NULL, or _list
+     *          or 0 when the list is full, _list is 0, or _list
      *          is uninitialised.
      */
     void* rgDenseListAlloc(DenseList* _list);
@@ -819,7 +818,7 @@ extern "C" {
      * refer to a different logical element. Callers must refetch the
      * pointer via rgDenseListAt / rgDenseListData before using it again.
      *
-     * No-op when _list is NULL, _list is uninitialised, or the list is
+     * No-op when _list is 0, _list is uninitialised, or the list is
      * empty. _ptr must be the start of one of the live blocks at slots
      * [0, m_count) -- equivalently, a pointer previously returned by
      * rgDenseListAlloc / rgDenseListAt / rgDenseListData and not yet
@@ -853,7 +852,7 @@ extern "C" {
      *   }
      *
      * @param[in] _list - DenseList to query.
-     * @returns Base pointer, or NULL when _list is NULL / uninitialised.
+     * @returns Base pointer, or 0 when _list is 0 / uninitialised.
      */
     void* rgDenseListData(DenseList* _list);
 
@@ -861,8 +860,8 @@ extern "C" {
      *
      * @param[in] _list  - DenseList to query.
      * @param[in] _index - Logical index in [0, count).
-     * @returns Pointer to slot _index, or NULL when _index >= m_count
-     *          or _list is NULL / uninitialised.
+     * @returns Pointer to slot _index, or 0 when _index >= m_count
+     *          or _list is 0 / uninitialised.
      */
     void* rgDenseListAt(DenseList* _list, uint32_t _index);
 
@@ -876,7 +875,7 @@ extern "C" {
      * @param[in] _list - DenseList to query.
      * @param[in] _ptr  - Pointer to translate.
      * @returns Slot index in [0, m_maxBlocks), or UINT32_MAX when
-     *          _list is NULL / uninitialised, _ptr is NULL, or _ptr
+     *          _list is 0 / uninitialised, _ptr is 0, or _ptr
      *          lies outside the underlying buffer.
      */
     uint32_t rgDenseListIndexOf(DenseList* _list, void* _ptr);
@@ -884,7 +883,7 @@ extern "C" {
     /* Report the maximum number of blocks the list was created with.
      *
      * @param[in] _list - DenseList to query.
-     * @returns The configured block count, or 0 if _list is NULL or
+     * @returns The configured block count, or 0 if _list is 0 or
      *          uninitialised.
      */
     uint32_t rgDenseListMaxBlocks(DenseList* _list);
@@ -896,7 +895,7 @@ extern "C" {
      * the value originally passed to Create.
      *
      * @param[in] _list - DenseList to query.
-     * @returns The effective block size in bytes, or 0 if _list is NULL
+     * @returns The effective block size in bytes, or 0 if _list is 0
      *          or uninitialised.
      */
     uint32_t rgDenseListBlockSize(DenseList* _list);
@@ -904,7 +903,7 @@ extern "C" {
     /* Report the number of live blocks (equivalent to "size" or "length").
      *
      * @param[in] _list - DenseList to query.
-     * @returns The live block count, or 0 if _list is NULL or
+     * @returns The live block count, or 0 if _list is 0 or
      *          uninitialised.
      */
     uint32_t rgDenseListCount(DenseList* _list);
@@ -918,7 +917,7 @@ extern "C" {
      * @param[in] _list - DenseList to query.
      * @param[in] _ptr  - Pointer to test.
      * @returns 1 if _ptr lies within the buffer, 0 otherwise (including
-     *          when _list is NULL or uninitialised).
+     *          when _list is 0 or uninitialised).
      */
     int rgDenseListCheckPtr(DenseList* _list, void* _ptr);
 
@@ -932,11 +931,11 @@ extern "C" {
 
     /* Bind a HashMap to an arena and clear it.
      *
-     * @param[out] _map   - HashMap to initialise. Must be non-NULL.
+     * @param[out] _map   - HashMap to initialise. Must be non-0.
      * @param[in]  _arena - Live arena that nodes and keys will be allocated
      *                      from. The arena must remain live for the
      *                      lifetime of the HashMap.
-     * @returns 0 on success, -1 if _map is NULL or _arena is not live.
+     * @returns 0 on success, -1 if _map is 0 or _arena is not live.
      *          On failure *_map is left unchanged.
      */
     int32_t rgHashMapInit(HashMap* _map, Arena* _arena);
@@ -950,7 +949,7 @@ extern "C" {
      * value it wants through the returned pointer:
      *
      *     uint64_t* v = rgHashMapPut(m, key, keyLen);
-     *     if (v != NULL) *v = value;
+     *     if (v != 0) *v = value;
      *
      * The returned pointer is an absolute pointer into the host arena
      * (only the trie's inter-node child references are kept as offsets);
@@ -959,23 +958,23 @@ extern "C" {
      * @param[in] _map     - Live HashMap (rgHashMapInit'd).
      * @param[in] _key     - Pointer to key bytes.
      * @param[in] _keyLen  - Length of _key, in bytes. May be zero.
-     * @returns Pointer to the value slot, or NULL on bad arguments or if
+     * @returns Pointer to the value slot, or 0 on bad arguments or if
      *          the arena is exhausted (the key was not inserted).
      */
-    uint64_t* rgHashMapPut(HashMap* _map, const void* _key, size_t _keyLen);
+    uint64_t* rgHashMapPut(HashMap* _map, const void* _key, uint64_t _keyLen);
 
     /* Lookup a value by key.
      *
      * @param[in]  _map       - Live HashMap.
      * @param[in]  _key       - Pointer to key bytes.
      * @param[in]  _keyLen    - Length of _key, in bytes.
-     * @returns Pointer to the stored value on hit, or NULL on bad
+     * @returns Pointer to the stored value on hit, or 0 on bad
      *          arguments or key-not-found. The pointer is an absolute
      *          pointer into the host arena and stays valid until the arena
      *          is cleared or destroyed; the caller may read or overwrite
      *          the value through it.
      */
-    uint64_t* rgHashMapGet(HashMap* _map, const void* _key, size_t _keyLen);
+    uint64_t* rgHashMapGet(HashMap* _map, const void* _key, uint64_t _keyLen);
 
     /* Upsert, specialised for 8-byte uint64 keys.
      *
@@ -983,19 +982,19 @@ extern "C" {
      * computed inline (no function call, no length dispatch) and the key
      * match testing a single uint64 == instead of a byte loop. ~10-15%
      * faster than the generic Put on uint64-keyed workloads. Returns a
-     * pointer to the value slot (NULL on failure); see rgHashMapPut.
+     * pointer to the value slot (0 on failure); see rgHashMapPut.
      */
     uint64_t* rgHashMapPutU64(HashMap* _map, uint64_t _key);
 
     /* Lookup, specialised for 8-byte uint64 keys. Same speedup story
-     * as rgHashMapPutU64. Returns a pointer to the value on hit, NULL on
+     * as rgHashMapPutU64. Returns a pointer to the value on hit, 0 on
      * miss. */
     uint64_t* rgHashMapGetU64(HashMap* _map, uint64_t _key);
 
     /* Callback type for rgHashMapForEach. Return 0 to continue iteration,
      * non-zero to stop early. _key / _keyLen point at the inline key bytes
      * inside the node (valid until the host arena is cleared/destroyed). */
-    typedef int (*rgHashMapForEachFn)(const void* _key, size_t _keyLen,
+    typedef int (*rgHashMapForEachFn)(const void* _key, uint64_t _keyLen,
                                       uint64_t _value, void* _userData);
 
     /* Visit every entry in the map exactly once, in trie-traversal order
@@ -1003,7 +1002,7 @@ extern "C" {
      * key set but should not be relied upon -- it depends on hash bits.
      *
      * @param[in] _map      - Map to iterate.
-     * @param[in] _fn       - Callback to invoke per entry. NULL is a no-op.
+     * @param[in] _fn       - Callback to invoke per entry. 0 is a no-op.
      * @param[in] _userData - Opaque pointer forwarded to the callback.
      * @returns Number of entries visited (== map size when iteration
      *          completes; less when the callback stops early).
@@ -1028,7 +1027,7 @@ extern "C" {
      * independent slot loads in parallel, hiding cache miss latency that
      * a serial loop would expose one-by-one. On hit, _outValues[i] is set
      * and _outFound[i] is set to 1; on miss, _outFound[i] is set to 0 and
-     * _outValues[i] is left unchanged. _outFound may be NULL to skip the
+     * _outValues[i] is left unchanged. _outFound may be 0 to skip the
      * per-key flag (callers can detect hits another way, e.g. by
      * pre-initialising _outValues to a sentinel).
      *
@@ -1072,7 +1071,7 @@ extern "C" {
      * call _map behaves exactly as the saved map did, at whatever address
      * the file was mapped to.
      *
-     * @param[out] _map   - HashMap to populate. Must be non-NULL.
+     * @param[out] _map   - HashMap to populate. Must be non-0.
      * @param[in]  _arena - Arena mapped by rgArenaOpenShared. Must be live.
      * @returns 0 on success, -1 on bad arguments, -6 if the arena does not
      *          contain a compatible persisted HashMap.
@@ -1095,8 +1094,8 @@ extern "C" {
      * to re-empty a trie that has accumulated entries. A zero-initialised
      * HashTrie is already a valid empty trie; calling Init is optional.
      *
-     * @param[out] _trie - HashTrie to clear. Must be non-NULL.
-     * @returns 0 on success, -1 if _trie is NULL.
+     * @param[out] _trie - HashTrie to clear. Must be non-0.
+     * @returns 0 on success, -1 if _trie is 0.
      */
     int32_t rgHashTrieInit(HashTrie* _trie);
 
@@ -1106,9 +1105,9 @@ extern "C" {
      * Pass RGM_HASHTRIE_FLAG_NOCOPY to build a trie that references caller-
      * owned keys instead of copying them (read its contract before use).
      *
-     * @param[out] _trie  - HashTrie to clear. Must be non-NULL.
+     * @param[out] _trie  - HashTrie to clear. Must be non-0.
      * @param[in]  _flags - Bitwise OR of RGM_HASHTRIE_FLAG_* values.
-     * @returns 0 on success, -1 if _trie is NULL.
+     * @returns 0 on success, -1 if _trie is 0.
      */
     int32_t rgHashTrieInitEx(HashTrie* _trie, uint32_t _flags);
 
@@ -1130,15 +1129,15 @@ extern "C" {
      * the loser's arena and become unreachable (no leak in the GC sense,
      * but the arena's high-water mark advances).
      *
-     * @param[in] _trie    - Trie to insert into. Must be non-NULL.
+     * @param[in] _trie    - Trie to insert into. Must be non-0.
      * @param[in] _arena   - Live arena to allocate the new node from on
      *                       miss. May be ignored on a key-match overwrite,
-     *                       but is still required (must not be NULL).
+     *                       but is still required (must not be 0).
      * @returns 0 on success, -1 on bad arguments, -3 if _arena is
      *          exhausted.
      */
     int32_t rgHashTriePut(HashTrie* _trie, Arena* _arena,
-                          const void* _key, size_t _keyLen, uint64_t _value);
+                          const void* _key, uint64_t _keyLen, uint64_t _value);
 
     /* Lookup a value by key, atomically.
      *
@@ -1147,7 +1146,7 @@ extern "C" {
      *
      * @returns 0 on hit, -1 on bad arguments or key-not-found.
      */
-    int32_t rgHashTrieGet(HashTrie* _trie, const void* _key, size_t _keyLen, uint64_t* _outValue);
+    int32_t rgHashTrieGet(HashTrie* _trie, const void* _key, uint64_t _keyLen, uint64_t* _outValue);
 
     /* Insert or overwrite, specialised for 8-byte uint64 keys.
      *
@@ -1163,7 +1162,7 @@ extern "C" {
 
     /* Callback type for rgHashTrieForEach. Return 0 to continue, non-zero
      * to stop early. */
-    typedef int (*rgHashTrieForEachFn)(const void* _key, size_t _keyLen,
+    typedef int (*rgHashTrieForEachFn)(const void* _key, uint64_t _keyLen,
                                        uint64_t _value, void* _userData);
 
     /* Visit every entry in the trie exactly once. Iteration is "snapshot-
@@ -1244,11 +1243,11 @@ extern "C" {
      * itself is not retained -- after Put returns the caller can free /
      * reuse it. */
     int32_t rgHashIndexPut(HashIndex* _idx, Arena* _arena,
-                           const void* _key, size_t _keyLen, uint64_t _value);
+                           const void* _key, uint64_t _keyLen, uint64_t _value);
 
     /* Lookup by bytes. Same hashing as Put. */
     int32_t rgHashIndexGet(HashIndex* _idx,
-                           const void* _key, size_t _keyLen, uint64_t* _outValue);
+                           const void* _key, uint64_t _keyLen, uint64_t* _outValue);
 
     /* Insert or overwrite (pre-hashed API).
      *
@@ -1325,7 +1324,7 @@ extern "C" {
      * @param[in] _bits - Requested bit count (rounded up to next pow2 >= 64).
      * @returns Required buffer size in bytes, or 0 on overflow / zero input.
      */
-    size_t rgBloomFilterBufferSize(uint64_t _bits);
+    uint64_t rgBloomFilterBufferSize(uint64_t _bits);
 
     /* Create a Bloom filter with its bit array backed by the given arena.
      *
@@ -1337,11 +1336,11 @@ extern "C" {
      * so the actual fill ratio is at most 2x better than requested.
      *
      * @param[in]  _arena     - Arena to allocate the bit array from.
-     * @param[out] _bf        - BloomFilter to initialise. Must be non-NULL.
+     * @param[out] _bf        - BloomFilter to initialise. Must be non-0.
      * @param[in]  _bits      - Requested bit count.
      * @param[in]  _hashCount - Number of hash indices per Add / Test (k).
      * @returns 0 on success, or a negative error code:
-     *           -1 invalid argument (NULL _bf, NULL / uninit arena, zero
+     *           -1 invalid argument (0 _bf, 0 / uninit arena, zero
      *              _bits, zero _hashCount),
      *           -2 size overflow,
      *           -3 arena exhausted.
@@ -1365,13 +1364,13 @@ extern "C" {
      *           -2 size overflow,
      *           -4 _bufferSize is too small.
      */
-    int32_t rgBloomFilterCreateFromMemory(void* _buffer, size_t _bufferSize,
+    int32_t rgBloomFilterCreateFromMemory(void* _buffer, uint64_t _bufferSize,
                                           BloomFilter* _bf,
                                           uint64_t _bits, uint32_t _hashCount);
 
     /* Add (byte-key). Computes wyhash + derived h2, sets k bits.
-     * No-op on a NULL / uninitialised filter or zero-length key. */
-    void rgBloomFilterAdd(BloomFilter* _bf, const void* _key, size_t _keyLen);
+     * No-op on a 0 / uninitialised filter or zero-length key. */
+    void rgBloomFilterAdd(BloomFilter* _bf, const void* _key, uint64_t _keyLen);
 
     /* Add (uint64-key specialisation). Inlined hash, no length dispatch. */
     void rgBloomFilterAddU64(BloomFilter* _bf, uint64_t _key);
@@ -1382,8 +1381,8 @@ extern "C" {
 
     /* Test (byte-key). Returns 1 if all k bits are set ("possibly in
      * set"), 0 if any bit is missing ("definitely not in set"). Returns
-     * 0 for a NULL / uninitialised filter. */
-    int rgBloomFilterTest(BloomFilter* _bf, const void* _key, size_t _keyLen);
+     * 0 for a 0 / uninitialised filter. */
+    int rgBloomFilterTest(BloomFilter* _bf, const void* _key, uint64_t _keyLen);
 
     /* Test (uint64-key specialisation). */
     int rgBloomFilterTestU64(BloomFilter* _bf, uint64_t _key);

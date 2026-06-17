@@ -34,23 +34,23 @@
 
 /* Error codes (RGM_ERROR_*) are declared in rg_memory.h and shared with DenseList. */
 
-/* A FreeList with m_buffer == NULL is treated as uninitialised: queries
- * report zero, Alloc returns NULL, Free / CheckPtr do nothing. */
+/* A FreeList with m_buffer == 0 is treated as uninitialised: queries
+ * report zero, Alloc returns 0, Free / CheckPtr do nothing. */
 static int rgm_freelist_is_live(const FreeList* _fl)
 {
-    return _fl != NULL && _fl->m_buffer != NULL;
+    return _fl != 0 && _fl->m_buffer != 0;
 }
 
 /* Apply the clamp + 16-byte round-up that both Create variants share, and
  * also enforce that the result fits in a uint32_t (since m_blockSize is one).
  * Returns 0 on overflow / bad input. */
-static size_t rgm_freelist_effective_block_size(size_t _blockSize)
+static uint64_t rgm_freelist_effective_block_size(uint64_t _blockSize)
 {
     if (_blockSize < sizeof(uint32_t))
     {
         _blockSize = sizeof(uint32_t);
     }
-    _blockSize = (_blockSize + 15u) & ~(size_t)15u;
+    _blockSize = (_blockSize + 15u) & ~(uint64_t)15u;
     if (_blockSize == 0 || _blockSize > 0xFFFFFFFFu)
     {
         return 0;
@@ -59,16 +59,16 @@ static size_t rgm_freelist_effective_block_size(size_t _blockSize)
 }
 
 /* Wire up *_fl, eagerly linking every block into the free chain. Caller has
- * already validated the inputs: _buffer non-NULL, _blockSize the clamped
+ * already validated the inputs: _buffer non-0, _blockSize the clamped
  * effective size, _maxBlocks non-zero. */
 static void rgm_freelist_install(FreeList* _fl, uint8_t* _buffer,
                                  uint32_t _blockSize, uint32_t _maxBlocks)
 {
     for (uint32_t i = 0; i + 1u < _maxBlocks; ++i)
     {
-        *(uint32_t*)(_buffer + (size_t)i * _blockSize) = i + 1u;
+        *(uint32_t*)(_buffer + (uint64_t)i * _blockSize) = i + 1u;
     }
-    *(uint32_t*)(_buffer + (size_t)(_maxBlocks - 1u) * _blockSize) = _maxBlocks;
+    *(uint32_t*)(_buffer + (uint64_t)(_maxBlocks - 1u) * _blockSize) = _maxBlocks;
 
     _fl->m_maxBlocks  = _maxBlocks;
     _fl->m_blockSize  = _blockSize;
@@ -80,13 +80,13 @@ static void rgm_freelist_install(FreeList* _fl, uint8_t* _buffer,
 /* ------------------------------------------------------------------------- */
 
 /* Return the post-round-up buffer requirement, or 0 on overflow / zero input. */
-size_t rgFreeListBufferSize(size_t _blockSize, uint32_t _maxBlocks)
+uint64_t rgFreeListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks)
 {
     if (_maxBlocks == 0)
     {
         return 0;
     }
-    size_t bs = rgm_freelist_effective_block_size(_blockSize);
+    uint64_t bs = rgm_freelist_effective_block_size(_blockSize);
     if (bs == 0 || bs > SIZE_MAX / _maxBlocks)
     {
         return 0;
@@ -96,23 +96,23 @@ size_t rgFreeListBufferSize(size_t _blockSize, uint32_t _maxBlocks)
 
 /* Populate *_list with an arena-backed block buffer. */
 int32_t rgFreeListCreate(Arena* _arena, FreeList* _list,
-                         size_t _blockSize, uint32_t _maxBlocks)
+                         uint64_t _blockSize, uint32_t _maxBlocks)
 {
-    if (_list == NULL || _maxBlocks == 0)
+    if (_list == 0 || _maxBlocks == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 
-    size_t bs = rgm_freelist_effective_block_size(_blockSize);
+    uint64_t bs = rgm_freelist_effective_block_size(_blockSize);
     if (bs == 0 || bs > SIZE_MAX / _maxBlocks)
     {
         return RGM_ERROR_ERR_OVERFLOW;
     }
 
-    /* An invalid arena surfaces as a NULL alloc; distinguish it from genuine
+    /* An invalid arena surfaces as a 0 alloc; distinguish it from genuine
      * arena exhaustion so callers can tell a programming error from an OOM. */
     uint8_t* buffer = (uint8_t*)rgArenaAlloc(_arena, bs * _maxBlocks);
-    if (buffer == NULL)
+    if (buffer == 0)
     {
         return rgArenaIsValid(_arena) ? RGM_ERROR_ERR_NO_MEMORY
                                       : RGM_ERROR_ERR_INVALID;
@@ -123,16 +123,16 @@ int32_t rgFreeListCreate(Arena* _arena, FreeList* _list,
 }
 
 /* Populate *_list using caller-owned _buffer; caller retains ownership. */
-int32_t rgFreeListCreateFromMemory(void* _buffer, size_t _bufferSize,
+int32_t rgFreeListCreateFromMemory(void* _buffer, uint64_t _bufferSize,
                                    FreeList* _list,
-                                   size_t _blockSize, uint32_t _maxBlocks)
+                                   uint64_t _blockSize, uint32_t _maxBlocks)
 {
-    if (_list == NULL || _buffer == NULL || _maxBlocks == 0)
+    if (_list == 0 || _buffer == 0 || _maxBlocks == 0)
     {
         return RGM_ERROR_ERR_INVALID;
     }
 
-    size_t bs = rgm_freelist_effective_block_size(_blockSize);
+    uint64_t bs = rgm_freelist_effective_block_size(_blockSize);
     if (bs == 0 || bs > SIZE_MAX / _maxBlocks)
     {
         return RGM_ERROR_ERR_OVERFLOW;
@@ -150,12 +150,12 @@ int32_t rgFreeListCreateFromMemory(void* _buffer, size_t _bufferSize,
     return RGM_ERROR_OK;
 }
 
-/* Pop one block off the free chain, or return NULL when empty / inert. */
+/* Pop one block off the free chain, or return 0 when empty / inert. */
 void* rgFreeListAlloc(FreeList* _list)
 {
     if (!rgm_freelist_is_live(_list) || _list->m_blocksFree == 0)
     {
-        return NULL;
+        return 0;
     }
 
     void*    ret      = _list->m_next;
@@ -166,8 +166,8 @@ void* rgFreeListAlloc(FreeList* _list)
      * chain is valid because Create eagerly initialised them and Free writes
      * a real index (or the sentinel when pushing onto an empty chain). */
     _list->m_next = (next_idx == _list->m_maxBlocks)
-                      ? NULL
-                      : _list->m_buffer + (size_t)next_idx * _list->m_blockSize;
+                      ? 0
+                      : _list->m_buffer + (uint64_t)next_idx * _list->m_blockSize;
     return ret;
 }
 

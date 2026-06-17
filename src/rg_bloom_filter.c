@@ -66,7 +66,7 @@
 /* True when the filter has been Created and holds a live bit array. */
 static int rgm_bloom_is_live(const BloomFilter* _bf)
 {
-    return _bf != NULL && _bf->m_bits != NULL;
+    return _bf != 0 && _bf->m_bits != 0;
 }
 
 /* Maximum block count this function will return. Constrained by the fact
@@ -134,20 +134,20 @@ static void rgm_bloom_install(BloomFilter* _bf, uint64_t* _bits,
 
 /* ------------------------------------------------------------------------- */
 
-size_t rgBloomFilterBufferSize(uint64_t _bits)
+uint64_t rgBloomFilterBufferSize(uint64_t _bits)
 {
     uint32_t blocks = rgm_bloom_round_blocks(_bits);
     if (blocks == 0)
     {
         return 0;
     }
-    return (size_t)blocks * (size_t)RGM_BLOOM_BLOCK_BYTES;
+    return (uint64_t)blocks * (uint64_t)RGM_BLOOM_BLOCK_BYTES;
 }
 
 int32_t rgBloomFilterCreate(Arena* _arena, BloomFilter* _bf,
                             uint64_t _bits, uint32_t _hashCount)
 {
-    if (_bf == NULL || _bits == 0 || _hashCount == 0)
+    if (_bf == 0 || _bits == 0 || _hashCount == 0)
     {
         return RGM_BLOOM_ERR_INVALID;
     }
@@ -156,12 +156,12 @@ int32_t rgBloomFilterCreate(Arena* _arena, BloomFilter* _bf,
     {
         return RGM_BLOOM_ERR_OVERFLOW;
     }
-    size_t bytes = (size_t)blocks * (size_t)RGM_BLOOM_BLOCK_BYTES;
+    uint64_t bytes = (uint64_t)blocks * (uint64_t)RGM_BLOOM_BLOCK_BYTES;
 
     /* Cache-line align the bit array so the per-block guarantee
      * ("one line per Add / Test") holds for every block. */
     uint64_t* buf = (uint64_t*)rgArenaAllocAligned(_arena, bytes, RGM_CACHE_LINE);
-    if (buf == NULL)
+    if (buf == 0)
     {
         return rgArenaIsValid(_arena) ? RGM_BLOOM_ERR_NO_MEMORY
                                       : RGM_BLOOM_ERR_INVALID;
@@ -170,11 +170,11 @@ int32_t rgBloomFilterCreate(Arena* _arena, BloomFilter* _bf,
     return RGM_BLOOM_OK;
 }
 
-int32_t rgBloomFilterCreateFromMemory(void* _buffer, size_t _bufferSize,
+int32_t rgBloomFilterCreateFromMemory(void* _buffer, uint64_t _bufferSize,
                                       BloomFilter* _bf,
                                       uint64_t _bits, uint32_t _hashCount)
 {
-    if (_buffer == NULL || _bf == NULL || _bits == 0 || _hashCount == 0)
+    if (_buffer == 0 || _bf == 0 || _bits == 0 || _hashCount == 0)
     {
         return RGM_BLOOM_ERR_INVALID;
     }
@@ -183,7 +183,7 @@ int32_t rgBloomFilterCreateFromMemory(void* _buffer, size_t _bufferSize,
     {
         return RGM_BLOOM_ERR_OVERFLOW;
     }
-    size_t bytes = (size_t)blocks * (size_t)RGM_BLOOM_BLOCK_BYTES;
+    uint64_t bytes = (uint64_t)blocks * (uint64_t)RGM_BLOOM_BLOCK_BYTES;
     if (_bufferSize < bytes)
     {
         return RGM_BLOOM_ERR_TOO_SMALL;
@@ -218,7 +218,7 @@ void rgBloomFilterClear(BloomFilter* _bf)
 static RGM_FORCEINLINE void rgm_bloom_add_h(BloomFilter* _bf, uint64_t _h1, uint64_t _h2)
 {
     uint64_t  block_idx = _h1 & _bf->m_blockMask;
-    uint64_t* block     = _bf->m_bits + (size_t)block_idx * RGM_BLOOM_BLOCK_WORDS;
+    uint64_t* block     = _bf->m_bits + (uint64_t)block_idx * RGM_BLOOM_BLOCK_WORDS;
 
     /* In-block double hashing: K bit positions = start + i * delta (mod 512).
      * `delta` is forced odd so it's coprime with 512 -- this guarantees the
@@ -242,7 +242,7 @@ static RGM_FORCEINLINE void rgm_bloom_add_h(BloomFilter* _bf, uint64_t _h1, uint
 static RGM_FORCEINLINE int rgm_bloom_test_h(const BloomFilter* _bf, uint64_t _h1, uint64_t _h2)
 {
     uint64_t  block_idx = _h1 & _bf->m_blockMask;
-    uint64_t* block     = _bf->m_bits + (size_t)block_idx * RGM_BLOOM_BLOCK_WORDS;
+    uint64_t* block     = _bf->m_bits + (uint64_t)block_idx * RGM_BLOOM_BLOCK_WORDS;
 
     uint32_t pos   = (uint32_t)(_h2          & RGM_BLOOM_BLOCK_BIT_MASK);
     uint32_t delta = (uint32_t)((_h2 >> 32)  & RGM_BLOOM_BLOCK_BIT_MASK) | 1u;
@@ -286,9 +286,9 @@ void rgBloomFilterAddU64(BloomFilter* _bf, uint64_t _key)
     rgm_bloom_add_h(_bf, h1, h2);
 }
 
-void rgBloomFilterAdd(BloomFilter* _bf, const void* _key, size_t _keyLen)
+void rgBloomFilterAdd(BloomFilter* _bf, const void* _key, uint64_t _keyLen)
 {
-    if (!rgm_bloom_is_live(_bf) || (_key == NULL && _keyLen != 0))
+    if (!rgm_bloom_is_live(_bf) || (_key == 0 && _keyLen != 0))
     {
         return;
     }
@@ -317,9 +317,9 @@ int rgBloomFilterTestU64(BloomFilter* _bf, uint64_t _key)
     return rgm_bloom_test_h(_bf, h1, h2);
 }
 
-int rgBloomFilterTest(BloomFilter* _bf, const void* _key, size_t _keyLen)
+int rgBloomFilterTest(BloomFilter* _bf, const void* _key, uint64_t _keyLen)
 {
-    if (!rgm_bloom_is_live(_bf) || (_key == NULL && _keyLen != 0))
+    if (!rgm_bloom_is_live(_bf) || (_key == 0 && _keyLen != 0))
     {
         return 0;
     }

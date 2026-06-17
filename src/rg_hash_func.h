@@ -93,7 +93,7 @@ static RGM_FORCEINLINE uint32_t rgm_hash_load_u32(const uint8_t* _p)
 }
 
 /* Pack 1, 2, or 3 bytes into the bottom of a uint64. */
-static RGM_FORCEINLINE uint64_t rgm_hash_load_u3(const uint8_t* _p, size_t _k)
+static RGM_FORCEINLINE uint64_t rgm_hash_load_u3(const uint8_t* _p, uint64_t _k)
 {
     return ((uint64_t)_p[0]         << 16)
          | ((uint64_t)_p[_k >> 1]   <<  8)
@@ -189,7 +189,7 @@ static RGM_FORCEINLINE void rgm_hash_wymix128(uint64_t _a, uint64_t _b,
  * push it past L1 i-cache effective capacity. Leaving the decision to
  * the inliner gives the right call-vs-inline balance for both ST and
  * MT paths on the workloads measured. */
-static inline uint64_t rgm_hash_wyhash_seeded(const void* _data, size_t _len, uint64_t _seed)
+static inline uint64_t rgm_hash_wyhash_seeded(const void* _data, uint64_t _len, uint64_t _seed)
 {
     const uint8_t* p    = (const uint8_t*)_data;
     uint64_t       seed = _seed;
@@ -231,7 +231,7 @@ static inline uint64_t rgm_hash_wyhash_seeded(const void* _data, size_t _len, ui
     }
     else
     {
-        size_t i = _len;
+        uint64_t i = _len;
         if (i > 48)
         {
             uint64_t see1 = seed;
@@ -262,7 +262,7 @@ static inline uint64_t rgm_hash_wyhash_seeded(const void* _data, size_t _len, ui
 /* Default-seeded wyhash. Drop-in replacement for FNV-1a but faster on
  * every length and with much better avalanche. The initial state is
  * RGM_HASH_WYP0, matching the upstream wyhash v4 final convention. */
-static inline uint64_t rgm_hash_wyhash(const void* _data, size_t _len)
+static inline uint64_t rgm_hash_wyhash(const void* _data, uint64_t _len)
 {
     return rgm_hash_wyhash_seeded(_data, _len, RGM_HASH_WYP0);
 }
@@ -331,7 +331,7 @@ static RGM_FORCEINLINE uint64_t rgm_hash_u64(uint64_t _key)
 #define RGM_HASH_RESEED_SEED(_round) (RGM_HASH_WYP0 ^ (RGM_HASH_WYP3 * (uint64_t)(_round)))
 
 /* Byte-keyed reseed (HashMap, HashTrie): re-hash the key with a fresh seed. */
-static RGM_FORCEINLINE uint64_t rgm_hash_reseed_bytes(const void* _key, size_t _keyLen,
+static RGM_FORCEINLINE uint64_t rgm_hash_reseed_bytes(const void* _key, uint64_t _keyLen,
                                                       uint32_t _round)
 {
     return rgm_hash_wyhash_seeded(_key, _keyLen, RGM_HASH_RESEED_SEED(_round));
@@ -389,7 +389,7 @@ static RGM_FORCEINLINE void rgm_hash_u64_128(uint64_t _key,
  * has a single (Bloom filter) caller, so the marginal cost of duplicating
  * 30 lines once is worth not perturbing the inlining decisions the
  * upstream wyhash_seeded relies on for its many trie/index call sites. */
-static inline void rgm_hash_wyhash_128_seeded(const void* _data, size_t _len, uint64_t _seed,
+static inline void rgm_hash_wyhash_128_seeded(const void* _data, uint64_t _len, uint64_t _seed,
                                               uint64_t* _h1, uint64_t* _h2)
 {
     const uint8_t* p    = (const uint8_t*)_data;
@@ -426,7 +426,7 @@ static inline void rgm_hash_wyhash_128_seeded(const void* _data, size_t _len, ui
     }
     else
     {
-        size_t i = _len;
+        uint64_t i = _len;
         if (i > 48)
         {
             uint64_t see1 = seed;
@@ -455,7 +455,7 @@ static inline void rgm_hash_wyhash_128_seeded(const void* _data, size_t _len, ui
 }
 
 /* Default-seeded 128-bit wyhash. h1 matches rgm_hash_wyhash byte for byte. */
-static inline void rgm_hash_wyhash_128(const void* _data, size_t _len,
+static inline void rgm_hash_wyhash_128(const void* _data, uint64_t _len,
                                        uint64_t* _h1, uint64_t* _h2)
 {
     rgm_hash_wyhash_128_seeded(_data, _len, RGM_HASH_WYP0, _h1, _h2);
