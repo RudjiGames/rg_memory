@@ -232,7 +232,11 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
 #if RGM_PLATFORM_WINDOWS
     {
         DWORD  access = _readOnly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
-        DWORD  share  = FILE_SHARE_READ | (_readOnly ? 0u : (DWORD)FILE_SHARE_WRITE);
+        /* Always permit a concurrent writer (FILE_SHARE_WRITE), even for a read-only map: this lets us open + map a
+         * file another process is actively writing (e.g. tailing an UnrealTraceServer store .utrace, or any live
+         * capture). Harmless for files we own. The view is the size at map time; a concurrent append-only writer
+         * never touches our mapped pages. */
+        DWORD  share  = FILE_SHARE_READ | (DWORD)FILE_SHARE_WRITE;
         DWORD  disp   = _openExisting ? OPEN_EXISTING : CREATE_ALWAYS;
         DWORD  attr   = FILE_ATTRIBUTE_NORMAL;
         HANDLE f;
