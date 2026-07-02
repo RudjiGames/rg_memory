@@ -90,6 +90,12 @@ static uint32_t rgm_bloom_round_blocks(uint64_t _bits)
     {
         return 0;
     }
+    /* A _bits within 511 of UINT64_MAX would wrap the round-up below and
+     * yield a tiny block count instead of an overflow rejection. */
+    if (_bits > UINT64_MAX - ((uint64_t)RGM_BLOOM_BLOCK_BITS - 1ull))
+    {
+        return 0;
+    }
     /* Block count needed before pow-2 rounding. */
     uint64_t blocks = (_bits + (uint64_t)RGM_BLOOM_BLOCK_BITS - 1ull)
                     /  (uint64_t)RGM_BLOOM_BLOCK_BITS;

@@ -1001,6 +1001,11 @@ extern "C" {
      * (not insertion order). Iteration order is deterministic for a given
      * key set but should not be relied upon -- it depends on hash bits.
      *
+     * Traversal uses a fixed 64-frame stack. Reaching depth 64 requires
+     * engineered full-digest hash collisions (natural depth is ~log4(N));
+     * if it ever happens, debug builds trap and release builds skip the
+     * overflowing subtree.
+     *
      * @param[in] _map      - Map to iterate.
      * @param[in] _fn       - Callback to invoke per entry. 0 is a no-op.
      * @param[in] _userData - Opaque pointer forwarded to the callback.
@@ -1171,6 +1176,9 @@ extern "C" {
      * visited; values overwritten concurrently are seen as old-or-new
      * (never torn) per the standard HashTrie value-update contract.
      *
+     * Traversal uses a fixed 64-frame stack; see rgHashMapForEach for the
+     * depth-overflow behaviour (debug trap / release skip).
+     *
      * @returns Number of entries visited.
      */
     uint64_t rgHashTrieForEach(HashTrie* _trie, rgHashTrieForEachFn _fn, void* _userData);
@@ -1284,7 +1292,9 @@ extern "C" {
 
     /* Visit every entry. Same snapshot-like semantics as
      * rgHashTrieForEach: entries published before the call are visited,
-     * concurrent inserts may be missed, value updates are old-or-new. */
+     * concurrent inserts may be missed, value updates are old-or-new.
+     * Same fixed 64-frame traversal stack as rgHashMapForEach (debug
+     * trap / release skip on depth overflow). */
     uint64_t rgHashIndexForEach(HashIndex* _idx, rgHashIndexForEachFn _fn,
                                 void* _userData);
 
@@ -1321,7 +1331,9 @@ extern "C" {
      * Returns the effective backing size (after rounding bits up to the
      * next power of two and the resulting bit array's byte size).
      *
-     * @param[in] _bits - Requested bit count (rounded up to next pow2 >= 64).
+     * @param[in] _bits - Requested bit count (rounded up to a whole
+     *                    power-of-two number of 512-bit blocks; minimum
+     *                    one block = 512 bits).
      * @returns Required buffer size in bytes, or 0 on overflow / zero input.
      */
     uint64_t rgBloomFilterBufferSize(uint64_t _bits);
@@ -1332,8 +1344,9 @@ extern "C" {
      * the BloomFilter struct itself is caller-owned and needs no explicit
      * destroy. rgArenaClear / rgArenaDestroy reclaim the bit array.
      *
-     * The bit count is rounded up to the next power of two (minimum 64),
-     * so the actual fill ratio is at most 2x better than requested.
+     * The bit count is rounded up to a whole power-of-two number of
+     * 512-bit blocks (minimum one block = 512 bits), so the actual fill
+     * ratio is at most 2x better than requested.
      *
      * @param[in]  _arena     - Arena to allocate the bit array from.
      * @param[out] _bf        - BloomFilter to initialise. Must be non-0.
@@ -1355,8 +1368,11 @@ extern "C" {
      * by the caller. The buffer must outlive the BloomFilter; nothing in
      * this library frees or otherwise touches _buffer after this call.
      *
-     * _buffer must be 8-byte aligned so the bit array words are naturally
-     * aligned (required for atomic OR / load on every target).
+     * _buffer must be 64-byte (cache-line) aligned so each 512-bit block
+     * occupies exactly one cache line -- this is what preserves the
+     * one-line-per-Add/Test guarantee, and it also satisfies the natural
+     * alignment the atomic OR / load operations require. Misaligned
+     * buffers trigger an assertion in debug builds.
      * _bufferSize must be at least rgBloomFilterBufferSize(_bits).
      *
      * @returns 0 on success, or a negative error code:
@@ -1369,7 +1385,9 @@ extern "C" {
                                           uint64_t _bits, uint32_t _hashCount);
 
     /* Add (byte-key). Computes wyhash + derived h2, sets k bits.
-     * No-op on a 0 / uninitialised filter or zero-length key. */
+     * No-op on a 0 / uninitialised filter, or when _key is 0 with a
+     * non-zero _keyLen. A zero-length key is valid: it hashes as the
+     * empty input and occupies its own k bits like any other key. */
     void rgBloomFilterAdd(BloomFilter* _bf, const void* _key, uint64_t _keyLen);
 
     /* Add (uint64-key specialisation). Inlined hash, no length dispatch. */

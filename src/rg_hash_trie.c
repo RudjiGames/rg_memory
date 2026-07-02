@@ -84,8 +84,11 @@ int32_t rgHashTrieInit(HashTrie* _trie)
 int32_t rgHashTriePut(HashTrie* restrict _trie, Arena* restrict _arena,
                       const void* restrict _key, uint64_t _keyLen, uint64_t _value)
 {
+    /* _keyLen > UINT32_MAX is rejected because the node format stores key
+     * length as uint32_t; storing such a key would truncate the length
+     * ForEach reports. */
     if (_trie == 0 || _arena == 0 || _arena->m_base == 0
-     || (_key == 0 && _keyLen != 0))
+     || (_key == 0 && _keyLen != 0) || _keyLen > UINT32_MAX)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -158,7 +161,9 @@ int32_t rgHashTriePut(HashTrie* restrict _trie, Arena* restrict _arena,
 int32_t rgHashTrieGet(HashTrie* restrict _trie, const void* restrict _key,
                       uint64_t _keyLen, uint64_t* restrict _outValue)
 {
-    if (_trie == 0 || (_key == 0 && _keyLen != 0))
+    /* Keys longer than UINT32_MAX can never be stored (see rgHashTriePut),
+     * so reject them here too instead of walking with a truncated compare. */
+    if (_trie == 0 || (_key == 0 && _keyLen != 0) || _keyLen > UINT32_MAX)
     {
         return RGM_ERROR_ERR_INVALID;
     }
@@ -480,14 +485,24 @@ uint64_t rgHashTrieForEach(HashTrie* _trie, rgHashTrieForEachFn _fn, void* _user
                 uint64_t cur = (uint64_t)rgm_atomic_load_i64(
                                     (const rgm_atomic_i64*)&f->node->m_child[f->nextChild]);
                 f->nextChild++;
-                if (cur != 0 && sp < RGM_HASH_TRIE_ITER_STACK_DEPTH)
+                if (cur != 0)
                 {
-                    stack[sp].node      = (HashNode*)(uintptr_t)cur;
-                    stack[sp].visited   = 0;
-                    stack[sp].nextChild = 0;
-                    sp++;
-                    /* No software prefetch here -- same trade-off as
-                     * HashMap's ForEach (see rg_hash_map.c). */
+                    if (sp < RGM_HASH_TRIE_ITER_STACK_DEPTH)
+                    {
+                        stack[sp].node      = (HashNode*)(uintptr_t)cur;
+                        stack[sp].visited   = 0;
+                        stack[sp].nextChild = 0;
+                        sp++;
+                        /* No software prefetch here -- same trade-off as
+                         * HashMap's ForEach (see rg_hash_map.c). */
+                    }
+                    else
+                    {
+                        /* Depth > 64 requires engineered full-digest hash
+                         * collisions; trap in debug rather than silently
+                         * skipping the subtree. */
+                        RGM_FAIL("rgHashTrieForEach: iteration stack overflow; subtree skipped");
+                    }
                 }
             }
             else

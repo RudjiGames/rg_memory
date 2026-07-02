@@ -406,12 +406,22 @@ uint64_t rgHashIndexForEach(HashIndex* _idx, rgHashIndexForEachFn _fn, void* _us
                 uint64_t cur = (uint64_t)rgm_atomic_load_i64(
                                     (const rgm_atomic_i64*)&f->node->m_child[f->nextChild]);
                 f->nextChild++;
-                if (cur != 0 && sp < RGM_HASH_INDEX_ITER_STACK_DEPTH)
+                if (cur != 0)
                 {
-                    stack[sp].node      = (HashIndexNode*)(uintptr_t)cur;
-                    stack[sp].visited   = 0;
-                    stack[sp].nextChild = 0;
-                    sp++;
+                    if (sp < RGM_HASH_INDEX_ITER_STACK_DEPTH)
+                    {
+                        stack[sp].node      = (HashIndexNode*)(uintptr_t)cur;
+                        stack[sp].visited   = 0;
+                        stack[sp].nextChild = 0;
+                        sp++;
+                    }
+                    else
+                    {
+                        /* Depth > 64 requires engineered full-digest hash
+                         * collisions; trap in debug rather than silently
+                         * skipping the subtree. */
+                        RGM_FAIL("rgHashIndexForEach: iteration stack overflow; subtree skipped");
+                    }
                 }
             }
             else

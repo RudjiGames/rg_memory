@@ -94,6 +94,10 @@ static HashMapNode* rgm_hash_map_node_create(Arena* _arena, uint64_t _hash,
     uint64_t off = (uint64_t)((uint8_t*)node - _arena->m_base);
     if (off > UINT32_MAX)
     {
+        /* Roll the allocation back so repeated Puts on a >4 GiB-full arena
+         * don't keep advancing the high-water mark (alignment padding is
+         * not recovered; see rgArenaPop). */
+        rgArenaPop(_arena, total);
         return 0;
     }
     *_outOffset = (uint32_t)off;
@@ -156,7 +160,20 @@ int32_t rgHashMapInit(HashMap* _map, Arena* _arena)
          * allocate lands at offset 64, not 0. The sentinel allocation
          * itself is never dereferenced; it just keeps offset 0 free
          * to serve as the "empty slot" marker. */
-        (void)rgArenaAllocAligned(_arena, RGM_CACHE_LINE, RGM_CACHE_LINE);
+        uint8_t* sentinel = (uint8_t*)rgArenaAllocAligned(_arena, RGM_CACHE_LINE, RGM_CACHE_LINE);
+        if (sentinel != 0)
+        {
+            /* Zero it: rgArenaClear keeps committed pages, so an arena being
+             * reused for a fresh map may still hold a persist header from a
+             * previous session at offset 0. A stale header would make
+             * rgHashMapSave reuse a bogus index offset and silently corrupt
+             * the map. */
+            uint32_t i;
+            for (i = 0; i < RGM_CACHE_LINE; ++i)
+            {
+                sentinel[i] = 0;
+            }
+        }
     }
 
 #if RG_HASH_USE_TOP_INDEX
@@ -235,7 +252,8 @@ int32_t rgHashMapSave(HashMap* _map)
     if (hdr->m_magic == RGM_HASHMAP_MAGIC
      && hdr->m_version == RGM_HASHMAP_PERSIST_VERSION
      && hdr->m_topBits == RGM_HASH_MAP_INDEX_TOPBITS
-     && hdr->m_indexOffset != 0)
+     && hdr->m_indexOffset != 0
+     && hdr->m_indexOffset <= UINT32_MAX)
     {
         indexOffset = (uint32_t)hdr->m_indexOffset;
     }
@@ -249,6 +267,10 @@ int32_t rgHashMapSave(HashMap* _map)
         uint64_t off = (uint64_t)((uint8_t*)idx - base);
         if (off > UINT32_MAX)
         {
+            /* Roll the allocation back so a retried Save doesn't keep
+             * burning arena space (alignment padding is not recovered;
+             * see rgArenaPop). */
+            rgArenaPop(arena, RGM_HASH_MAP_INDEX_BYTES);
             return RGM_ERROR_ERR_NO_MEMORY;
         }
         indexOffset = (uint32_t)off;
@@ -277,12 +299,18 @@ int32_t rgHashMapOpen(HashMap* _map, Arena* _arena)
     uint8_t* base = _arena->m_base;
     const rgm_hash_map_persist_header* hdr = (const rgm_hash_map_persist_header*)base;
 
+    /* All header fields come from an untrusted file; the bounds checks are
+     * phrased so a huge m_indexOffset cannot wrap the addition and slip
+     * past. Save stores offsets as uint32_t, so anything above UINT32_MAX
+     * is corrupt by definition. */
     uint64_t cap = rgArenaCapacity(_arena);
     if (hdr->m_magic != RGM_HASHMAP_MAGIC
      || hdr->m_version != RGM_HASHMAP_PERSIST_VERSION
      || hdr->m_topBits != RGM_HASH_MAP_INDEX_TOPBITS
      || hdr->m_indexOffset == 0
-     || hdr->m_indexOffset + RGM_HASH_MAP_INDEX_BYTES > cap
+     || hdr->m_indexOffset > UINT32_MAX
+     || hdr->m_indexOffset > cap
+     || RGM_HASH_MAP_INDEX_BYTES > cap - hdr->m_indexOffset
      || hdr->m_highWater > cap)
     {
         return RGM_ERROR_ERR_FORMAT;
@@ -304,7 +332,9 @@ int32_t rgHashMapOpen(HashMap* _map, Arena* _arena)
 uint64_t* rgHashMapPut(HashMap* restrict _map, const void* restrict _key,
                        uint64_t _keyLen)
 {
-    if (!rgm_map_is_live(_map) || (_key == 0 && _keyLen != 0))
+    /* _keyLen > UINT32_MAX is rejected because the node format stores key
+     * length as uint32_t; such a key could never be stored or matched. */
+    if (!rgm_map_is_live(_map) || (_key == 0 && _keyLen != 0) || _keyLen > UINT32_MAX)
     {
         return 0;
     }
@@ -356,7 +386,9 @@ uint64_t* rgHashMapPut(HashMap* restrict _map, const void* restrict _key,
 uint64_t* rgHashMapGet(HashMap* restrict _map, const void* restrict _key,
                        uint64_t _keyLen)
 {
-    if (!rgm_map_is_live(_map) || (_key == 0 && _keyLen != 0))
+    /* _keyLen > UINT32_MAX is rejected because the node format stores key
+     * length as uint32_t; such a key could never be stored or matched. */
+    if (!rgm_map_is_live(_map) || (_key == 0 && _keyLen != 0) || _keyLen > UINT32_MAX)
     {
         return 0;
     }
@@ -647,14 +679,24 @@ uint64_t rgHashMapForEach(HashMap* _map, rgHashMapForEachFn _fn, void* _userData
             if (f->nextChild < 4)
             {
                 uint32_t cur = f->node->m_child[f->nextChild++];
-                if (cur != 0 && sp < RGM_HASH_ITER_STACK_DEPTH)
+                if (cur != 0)
                 {
-                    stack[sp].node      = RGM_HASH_MAP_NODE_AT(base, cur);
-                    stack[sp].visited   = 0;
-                    stack[sp].nextChild = 0;
-                    sp++;
-                    /* No software prefetch -- see Get path for the
-                     * trade-off rationale. */
+                    if (sp < RGM_HASH_ITER_STACK_DEPTH)
+                    {
+                        stack[sp].node      = RGM_HASH_MAP_NODE_AT(base, cur);
+                        stack[sp].visited   = 0;
+                        stack[sp].nextChild = 0;
+                        sp++;
+                        /* No software prefetch -- see Get path for the
+                         * trade-off rationale. */
+                    }
+                    else
+                    {
+                        /* Depth > 64 requires engineered full-digest hash
+                         * collisions; trap in debug rather than silently
+                         * skipping the subtree. */
+                        RGM_FAIL("rgHashMapForEach: iteration stack overflow; subtree skipped");
+                    }
                 }
             }
             else

@@ -244,9 +244,21 @@
         }
         static __forceinline int64_t rgm_atomic_load_i64(const rgm_atomic_i64* _p)
         {
+#       if defined(_M_IX86)
+            /* 32-bit x86: __iso_volatile_load64 compiles to two 32-bit moves,
+             * which can tear against a concurrent 64-bit CAS. movq is atomic
+             * for an aligned 8-byte access on every SSE2-capable CPU (Intel
+             * SDM vol. 3A, 8.1.1), so bounce through an XMM register. */
+            __m128i xv = _mm_loadl_epi64((const __m128i*)_p);
+            __int64 v;
+            _mm_storel_epi64((__m128i*)&v, xv);
+            _ReadWriteBarrier();
+            return (int64_t)v;
+#       else
             int64_t v = (int64_t)__iso_volatile_load64((const volatile __int64*)_p);
             _ReadWriteBarrier();
             return v;
+#       endif
         }
 #   endif
 
@@ -289,8 +301,16 @@
         }
         static __forceinline void rgm_atomic_store_i64(rgm_atomic_i64* _p, int64_t _v)
         {
+#       if defined(_M_IX86)
+            /* 32-bit x86: mirror of the load above -- a plain 64-bit store
+             * is two 32-bit moves and can tear; movq keeps it atomic. */
+            __int64 v = (__int64)_v;
+            _ReadWriteBarrier();
+            _mm_storel_epi64((__m128i*)_p, _mm_loadl_epi64((const __m128i*)&v));
+#       else
             _ReadWriteBarrier();
             __iso_volatile_store64((volatile __int64*)_p, (__int64)_v);
+#       endif
         }
 #   endif
 
