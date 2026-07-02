@@ -165,6 +165,132 @@ void rgMemoryTest_hashMapOpenRejectsGarbage(void)
     remove(RGM_PERSIST_PATH2);
 }
 
+/* -------------------------------------------------------------------------
+ * Arena reuse: a map re-Init'd on a Cleared arena must not let Save trust
+ * the previous session's persist header (rgArenaClear keeps committed
+ * pages, so the stale header bytes survive at offset 0)
+ * ------------------------------------------------------------------------- */
+
+void rgMemoryTest_hashMapArenaReuseAfterClear(void)
+{
+    remove(RGM_PERSIST_PATH2);
+
+    Arena a;
+    TEST_ASSERT_EQUAL_INT(0, rgArenaCreateShared(&a, RGM_PERSIST_PATH2, 8 * 1024 * 1024));
+
+    /* Session A: build + save a first map, then discard it with Clear. */
+    {
+        HashMap m;
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapInit(&m, &a));
+        for (uint32_t i = 0; i < 512; ++i)
+        {
+            uint64_t* v = rgHashMapPutU64(&m, 0xA0000000ull + i);
+            TEST_ASSERT_NOT_NULL(v);
+            *v = i;
+        }
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapSave(&m));
+    }
+
+    /* Session B: reuse the arena for a brand-new map. A Save that trusted
+     * the stale header would park the index at session A's offset -- inside
+     * the region session B's nodes grow into -- and the second Save below
+     * would overwrite live nodes. */
+    rgArenaClear(&a);
+    {
+        HashMap m;
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapInit(&m, &a));
+        for (uint32_t i = 0; i < 2048; ++i)
+        {
+            uint64_t* v = rgHashMapPutU64(&m, 0xB0000000ull + i);
+            TEST_ASSERT_NOT_NULL(v);
+            *v = (uint64_t)i * 7u + 3u;
+        }
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapSave(&m));
+
+        for (uint32_t i = 2048; i < 4096; ++i)
+        {
+            uint64_t* v = rgHashMapPutU64(&m, 0xB0000000ull + i);
+            TEST_ASSERT_NOT_NULL(v);
+            *v = (uint64_t)i * 7u + 3u;
+        }
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapSave(&m));
+
+        /* The live map must be intact after the re-save. */
+        for (uint32_t i = 0; i < 4096; ++i)
+        {
+            uint64_t* v = rgHashMapGetU64(&m, 0xB0000000ull + i);
+            TEST_ASSERT_NOT_NULL(v);
+            TEST_ASSERT_EQUAL_UINT64((uint64_t)i * 7u + 3u, *v);
+        }
+    }
+    rgArenaFlush(&a);
+    rgArenaDestroy(&a);
+
+    /* Reopen: only the second map's entries exist, all values correct. */
+    {
+        Arena a2;
+        TEST_ASSERT_EQUAL_INT(0, rgArenaOpenShared(&a2, RGM_PERSIST_PATH2, 0));
+        HashMap m;
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapOpen(&m, &a2));
+        for (uint32_t i = 0; i < 4096; ++i)
+        {
+            uint64_t* v = rgHashMapGetU64(&m, 0xB0000000ull + i);
+            TEST_ASSERT_NOT_NULL(v);
+            TEST_ASSERT_EQUAL_UINT64((uint64_t)i * 7u + 3u, *v);
+        }
+        TEST_ASSERT_NULL(rgHashMapGetU64(&m, 0xA0000000ull));
+        rgArenaDestroy(&a2);
+    }
+
+    remove(RGM_PERSIST_PATH2);
+}
+
+/* -------------------------------------------------------------------------
+ * Open must reject a header whose index offset would wrap the bounds check
+ * ------------------------------------------------------------------------- */
+
+void rgMemoryTest_hashMapOpenRejectsCorruptIndexOffset(void)
+{
+    remove(RGM_PERSIST_PATH2);
+
+    /* Build a valid persisted map first. */
+    {
+        Arena a;
+        TEST_ASSERT_EQUAL_INT(0, rgArenaCreateShared(&a, RGM_PERSIST_PATH2, 1024 * 1024));
+        HashMap m;
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapInit(&m, &a));
+        uint64_t* v = rgHashMapPutU64(&m, 1234u);
+        TEST_ASSERT_NOT_NULL(v);
+        *v = 5678u;
+        TEST_ASSERT_EQUAL_INT(0, rgHashMapSave(&m));
+        rgArenaFlush(&a);
+        rgArenaDestroy(&a);
+    }
+
+    /* Corrupt the header's m_indexOffset (bytes 24..31: after the 8-byte
+     * magic, two 4-byte config fields and the 8-byte high-water mark) with
+     * a value that would wrap a naive `offset + indexBytes > cap` check. */
+    {
+        FILE* f = fopen(RGM_PERSIST_PATH2, "r+b");
+        TEST_ASSERT_NOT_NULL(f);
+        uint64_t evil = 0xFFFFFFFFFFFFC000ull;
+        TEST_ASSERT_EQUAL_INT(0, fseek(f, 24, SEEK_SET));
+        TEST_ASSERT_EQUAL_size_t(1, fwrite(&evil, sizeof(evil), 1, f));
+        fclose(f);
+    }
+
+    /* Open must fail cleanly with a format error, not crash on a wild read. */
+    {
+        Arena a;
+        TEST_ASSERT_EQUAL_INT(0, rgArenaOpenShared(&a, RGM_PERSIST_PATH2, 0));
+        HashMap m;
+        TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_FORMAT, rgHashMapOpen(&m, &a));
+        rgArenaDestroy(&a);
+    }
+
+    remove(RGM_PERSIST_PATH2);
+}
+
 void rgMemoryTest_hashMapSaveNullSafe(void)
 {
     TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_INVALID, rgHashMapSave(NULL));
@@ -180,5 +306,7 @@ void rgMemoryTest_Persist(void)
     RUN_TEST(rgMemoryTest_sharedArenaBasicAlloc);
     RUN_TEST(rgMemoryTest_hashMapPersistRoundTrip);
     RUN_TEST(rgMemoryTest_hashMapOpenRejectsGarbage);
+    RUN_TEST(rgMemoryTest_hashMapArenaReuseAfterClear);
+    RUN_TEST(rgMemoryTest_hashMapOpenRejectsCorruptIndexOffset);
     RUN_TEST(rgMemoryTest_hashMapSaveNullSafe);
 }

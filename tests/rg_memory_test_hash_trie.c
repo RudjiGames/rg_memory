@@ -68,6 +68,23 @@ void rgMemoryTest_hashTriePutUninitArenaFails(void)
     TEST_ASSERT_EQUAL_INT(-1, rgHashTriePut(&t, &a, "k", 1, 42));
 }
 
+void rgMemoryTest_hashTrieRejectsOversizedKeyLen(void)
+{
+    Arena a;
+    rgArenaCreate(&a, 64 * 1024);
+    HashTrie t;
+    rgHashTrieInit(&t);
+
+    /* Nodes store key length as uint32_t: lengths above UINT32_MAX must be
+     * rejected up front, before the key bytes are ever dereferenced. */
+    char key = 'x';
+    uint64_t v = 0;
+    TEST_ASSERT_EQUAL_INT(-1, rgHashTriePut(&t, &a, &key, (uint64_t)UINT32_MAX + 1ull, 42));
+    TEST_ASSERT_EQUAL_INT(-1, rgHashTrieGet(&t, &key, (uint64_t)UINT32_MAX + 1ull, &v));
+
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Put / Get
  * ------------------------------------------------------------------------- */
@@ -472,6 +489,7 @@ void rgMemoryTest_HashTrie(void)
     RUN_TEST(rgMemoryTest_hashTrieInitBasic);
     RUN_TEST(rgMemoryTest_hashTriePutNullArenaFails);
     RUN_TEST(rgMemoryTest_hashTriePutUninitArenaFails);
+    RUN_TEST(rgMemoryTest_hashTrieRejectsOversizedKeyLen);
 
     RUN_TEST(rgMemoryTest_hashTriePutGetBasic);
     RUN_TEST(rgMemoryTest_hashTrieGetMissReturnsError);

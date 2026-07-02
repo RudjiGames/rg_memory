@@ -56,6 +56,22 @@ void rgMemoryTest_hashMapInitUninitArenaFails(void)
     TEST_ASSERT_EQUAL_INT(-1, rgHashMapInit(&m, &a));
 }
 
+void rgMemoryTest_hashMapRejectsOversizedKeyLen(void)
+{
+    Arena a;
+    rgArenaCreate(&a, 64 * 1024);
+    HashMap m;
+    TEST_ASSERT_EQUAL_INT(0, rgHashMapInit(&m, &a));
+
+    /* Nodes store key length as uint32_t: lengths above UINT32_MAX must be
+     * rejected up front, before the key bytes are ever dereferenced. */
+    char key = 'x';
+    TEST_ASSERT_NULL(rgHashMapPut(&m, &key, (uint64_t)UINT32_MAX + 1ull));
+    TEST_ASSERT_NULL(rgHashMapGet(&m, &key, (uint64_t)UINT32_MAX + 1ull));
+
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Put / Get
  * ------------------------------------------------------------------------- */
@@ -512,6 +528,7 @@ void rgMemoryTest_HashMap(void)
     RUN_TEST(rgMemoryTest_hashMapInitBasic);
     RUN_TEST(rgMemoryTest_hashMapInitNullArenaFails);
     RUN_TEST(rgMemoryTest_hashMapInitUninitArenaFails);
+    RUN_TEST(rgMemoryTest_hashMapRejectsOversizedKeyLen);
 
     RUN_TEST(rgMemoryTest_hashMapPutGetBasic);
     RUN_TEST(rgMemoryTest_hashMapPutZeroInitsNewValue);

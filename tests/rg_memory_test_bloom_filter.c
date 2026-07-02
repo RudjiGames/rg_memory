@@ -79,6 +79,21 @@ void rgMemoryTest_bloomFilterCreateRejectsBadArgs(void)
     TEST_ASSERT_EQUAL_INT32(-1, rgBloomFilterCreate(&a, &bf, 1024, 7));
 }
 
+void rgMemoryTest_bloomFilterRejectsOverflowBits(void)
+{
+    /* Bit counts that would wrap the whole-block round-up must be rejected,
+     * not silently rounded down to a tiny (useless) filter. */
+    TEST_ASSERT_EQUAL_size_t(0, rgBloomFilterBufferSize(UINT64_MAX));
+    TEST_ASSERT_EQUAL_size_t(0, rgBloomFilterBufferSize(UINT64_MAX - 510u));
+
+    Arena a;
+    TEST_ASSERT_EQUAL_INT32(0, rgArenaCreate(&a, 64 * 1024));
+    BloomFilter bf;
+    memset(&bf, 0, sizeof(bf));
+    TEST_ASSERT_EQUAL_INT32(-2, rgBloomFilterCreate(&a, &bf, UINT64_MAX, 7));
+    rgArenaDestroy(&a);
+}
+
 void rgMemoryTest_bloomFilterCreateFromMemoryRejectsBadArgs(void)
 {
     BloomFilter bf;
@@ -274,6 +289,7 @@ void rgMemoryTest_BloomFilter(void)
     RUN_TEST(rgMemoryTest_bloomFilterNullHandle);
     RUN_TEST(rgMemoryTest_bloomFilterBufferSize);
     RUN_TEST(rgMemoryTest_bloomFilterCreateRejectsBadArgs);
+    RUN_TEST(rgMemoryTest_bloomFilterRejectsOverflowBits);
     RUN_TEST(rgMemoryTest_bloomFilterCreateFromMemoryRejectsBadArgs);
     RUN_TEST(rgMemoryTest_bloomFilterArenaRoundTrip);
     RUN_TEST(rgMemoryTest_bloomFilterMemoryRoundTrip);
