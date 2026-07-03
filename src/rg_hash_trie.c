@@ -428,6 +428,30 @@ typedef struct rgm_hash_trie_iter_frame
 
 #define RGM_HASH_TRIE_ITER_STACK_DEPTH 64
 
+/* Recursive fallback for chains deeper than the inline explicit stack (only
+ * reachable via engineered full-digest collisions). Visits _node and its whole
+ * subtree via the same atomic acquire-loads so release builds never silently
+ * drop the subtree. Only ever entered past depth 64. */
+static uint64_t rgm_hash_trie_foreach_rec(HashNode* _node, int _nocopy,
+                                          rgHashTrieForEachFn _fn, void* _userData, int* _stop)
+{
+    uint64_t count = 1;
+    int i;
+    uint64_t v = (uint64_t)rgm_atomic_load_i64((const rgm_atomic_i64*)&_node->m_value);
+    *_stop = _fn(rgm_hash_node_key_ext(_node, _nocopy), _node->m_keyLen, v, _userData);
+    if (*_stop) return count;
+    for (i = 0; i < 4; ++i)
+    {
+        uint64_t cur = (uint64_t)rgm_atomic_load_i64((const rgm_atomic_i64*)&_node->m_child[i]);
+        if (cur != 0)
+        {
+            count += rgm_hash_trie_foreach_rec((HashNode*)(uintptr_t)cur, _nocopy, _fn, _userData, _stop);
+            if (*_stop) break;
+        }
+    }
+    return count;
+}
+
 uint64_t rgHashTrieForEach(HashTrie* _trie, rgHashTrieForEachFn _fn, void* _userData)
 {
     if (_trie == 0 || _fn == 0)
@@ -499,9 +523,12 @@ uint64_t rgHashTrieForEach(HashTrie* _trie, rgHashTrieForEachFn _fn, void* _user
                     else
                     {
                         /* Depth > 64 requires engineered full-digest hash
-                         * collisions; trap in debug rather than silently
-                         * skipping the subtree. */
-                        RGM_FAIL("rgHashTrieForEach: iteration stack overflow; subtree skipped");
+                         * collisions. Trap in debug for the signal, then
+                         * recurse so the subtree is still fully visited
+                         * (release must not silently drop it). */
+                        RGM_FAIL("rgHashTrieForEach: iteration stack overflow; recursing");
+                        count += rgm_hash_trie_foreach_rec((HashNode*)(uintptr_t)cur, nocopy, _fn, _userData, &stop);
+                        if (stop) break;
                     }
                 }
             }

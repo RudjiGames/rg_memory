@@ -351,6 +351,31 @@ typedef struct rgm_hash_index_iter_frame
 
 #define RGM_HASH_INDEX_ITER_STACK_DEPTH 64
 
+/* Recursive fallback for chains deeper than the inline explicit stack. Unlike
+ * HashMap/HashTrie (which hash their keys internally), HashIndex takes the
+ * caller's pre-hashed (h1,h2), so depth is fully caller-controlled and deep
+ * chains are easy to construct -- this path must fully visit the subtree
+ * instead of the old release no-op that silently dropped it. */
+static uint64_t rgm_hash_index_foreach_rec(HashIndexNode* _node,
+                                           rgHashIndexForEachFn _fn, void* _userData, int* _stop)
+{
+    uint64_t count = 1;
+    int i;
+    uint64_t v = (uint64_t)rgm_atomic_load_i64((const rgm_atomic_i64*)&_node->m_value);
+    *_stop = _fn(_node->m_h1, _node->m_h2, v, _userData);
+    if (*_stop) return count;
+    for (i = 0; i < 4; ++i)
+    {
+        uint64_t cur = (uint64_t)rgm_atomic_load_i64((const rgm_atomic_i64*)&_node->m_child[i]);
+        if (cur != 0)
+        {
+            count += rgm_hash_index_foreach_rec((HashIndexNode*)(uintptr_t)cur, _fn, _userData, _stop);
+            if (*_stop) break;
+        }
+    }
+    return count;
+}
+
 uint64_t rgHashIndexForEach(HashIndex* _idx, rgHashIndexForEachFn _fn, void* _userData)
 {
     if (_idx == 0 || _fn == 0)
@@ -417,10 +442,13 @@ uint64_t rgHashIndexForEach(HashIndex* _idx, rgHashIndexForEachFn _fn, void* _us
                     }
                     else
                     {
-                        /* Depth > 64 requires engineered full-digest hash
-                         * collisions; trap in debug rather than silently
-                         * skipping the subtree. */
-                        RGM_FAIL("rgHashIndexForEach: iteration stack overflow; subtree skipped");
+                        /* Caller-controlled hashes make deep chains easy; trap
+                         * in debug for the signal, then recurse so the subtree
+                         * is still fully visited (release must not silently
+                         * drop it). */
+                        RGM_FAIL("rgHashIndexForEach: iteration stack overflow; recursing");
+                        count += rgm_hash_index_foreach_rec((HashIndexNode*)(uintptr_t)cur, _fn, _userData, &stop);
+                        if (stop) break;
                     }
                 }
             }

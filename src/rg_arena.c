@@ -840,8 +840,13 @@ void rgArenaDecommitFront(Arena* _arena, uint64_t _upToOffset)
      * reservation regardless of commit state). Intended for streaming filter-compaction, where the
      * source is consumed front-to-back and torn down once done - keeping peak commit ~= one arena. */
 #if RGM_PLATFORM_WINDOWS
+    /* MEM_DECOMMIT already makes the front pages inaccessible (a decommitted page traps on access). */
     (void)VirtualFree(_arena->m_base, (SIZE_T)end, MEM_DECOMMIT);
 #else
+    /* madvise(DONTNEED) only discards the physical pages; the mapping stays readable/writable and a stray
+     * access would silently refault zeroed pages. mprotect(PROT_NONE) makes the hole actually trap, matching
+     * the "valid only past _upToOffset" contract (and mirroring rgArenaShrink's decommit). */
     (void)madvise(_arena->m_base, (uint64_t)end, MADV_DONTNEED);
+    (void)mprotect(_arena->m_base, (uint64_t)end, PROT_NONE);
 #endif
 }

@@ -205,9 +205,16 @@ int rgFreeListCheckPtr(FreeList* _list, void* _ptr)
     {
         return 0;
     }
+    /* Compare as integers, not via pointer subtraction: _ptr may point outside the buffer object, and
+     * subtracting pointers into different objects is undefined behaviour the optimizer can exploit. */
     uintptr_t buffer_bytes = (uintptr_t)_list->m_maxBlocks * (uintptr_t)_list->m_blockSize;
-    uintptr_t offset       = (uintptr_t)((uint8_t*)_ptr - _list->m_buffer);
-    return buffer_bytes > offset ? 1 : 0;
+    uintptr_t p            = (uintptr_t)_ptr;
+    uintptr_t buf          = (uintptr_t)_list->m_buffer;
+    if (p < buf)
+    {
+        return 0;
+    }
+    return buffer_bytes > (p - buf) ? 1 : 0;
 }
 
 /* Configured block count, or 0 when the list is inert. */

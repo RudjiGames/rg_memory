@@ -223,8 +223,17 @@ uint32_t rgDenseListIndexOf(DenseList* _list, void* _ptr)
     {
         return UINT32_MAX;
     }
+    /* Integer arithmetic, not pointer subtraction: _ptr may point outside the buffer object and
+     * subtracting pointers into different objects is undefined behaviour the optimizer can exploit. */
     uintptr_t buffer_bytes = (uintptr_t)_list->m_maxBlocks * (uintptr_t)_list->m_blockSize;
-    uintptr_t offset       = (uintptr_t)((uint8_t*)_ptr - _list->m_buffer);
+    uintptr_t p            = (uintptr_t)_ptr;
+    uintptr_t buf          = (uintptr_t)_list->m_buffer;
+    uintptr_t offset;
+    if (p < buf)
+    {
+        return UINT32_MAX;
+    }
+    offset = p - buf;
     if (offset >= buffer_bytes)
     {
         return UINT32_MAX;
@@ -259,7 +268,14 @@ int rgDenseListCheckPtr(DenseList* _list, void* _ptr)
     {
         return 0;
     }
+    /* Integer arithmetic, not pointer subtraction: _ptr may point outside the buffer object and
+     * subtracting pointers into different objects is undefined behaviour the optimizer can exploit. */
     uintptr_t buffer_bytes = (uintptr_t)_list->m_maxBlocks * (uintptr_t)_list->m_blockSize;
-    uintptr_t offset       = (uintptr_t)((uint8_t*)_ptr - _list->m_buffer);
-    return buffer_bytes > offset ? 1 : 0;
+    uintptr_t p            = (uintptr_t)_ptr;
+    uintptr_t buf          = (uintptr_t)_list->m_buffer;
+    if (p < buf)
+    {
+        return 0;
+    }
+    return buffer_bytes > (p - buf) ? 1 : 0;
 }

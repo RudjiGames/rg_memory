@@ -627,6 +627,29 @@ typedef struct rgm_hash_iter_frame
 
 #define RGM_HASH_ITER_STACK_DEPTH 64
 
+/* Recursive fallback for the (engineered-collision-only) case where a chain
+ * runs deeper than the inline explicit stack. Visits _node and its whole
+ * subtree so entries are never silently dropped in release builds, where the
+ * old RGM_FAIL was a no-op. Only ever entered past depth 64. */
+static uint64_t rgm_hash_map_foreach_rec(uint8_t* _base, HashMapNode* _node,
+                                         rgHashMapForEachFn _fn, void* _userData, int* _stop)
+{
+    uint64_t count = 1;
+    int i;
+    *_stop = _fn(rgm_hash_map_node_key(_node), _node->m_keyLen, _node->m_value, _userData);
+    if (*_stop) return count;
+    for (i = 0; i < 4; ++i)
+    {
+        uint32_t cur = _node->m_child[i];
+        if (cur != 0)
+        {
+            count += rgm_hash_map_foreach_rec(_base, RGM_HASH_MAP_NODE_AT(_base, cur), _fn, _userData, _stop);
+            if (*_stop) break;
+        }
+    }
+    return count;
+}
+
 uint64_t rgHashMapForEach(HashMap* _map, rgHashMapForEachFn _fn, void* _userData)
 {
     if (_map == 0 || _map->m_arena == 0 || _map->m_arena->m_base == 0
@@ -693,9 +716,12 @@ uint64_t rgHashMapForEach(HashMap* _map, rgHashMapForEachFn _fn, void* _userData
                     else
                     {
                         /* Depth > 64 requires engineered full-digest hash
-                         * collisions; trap in debug rather than silently
-                         * skipping the subtree. */
-                        RGM_FAIL("rgHashMapForEach: iteration stack overflow; subtree skipped");
+                         * collisions. Trap in debug for the signal, then
+                         * recurse so the subtree is still fully visited
+                         * (release must not silently drop it). */
+                        RGM_FAIL("rgHashMapForEach: iteration stack overflow; recursing");
+                        count += rgm_hash_map_foreach_rec(base, RGM_HASH_MAP_NODE_AT(base, cur), _fn, _userData, &stop);
+                        if (stop) break;
                     }
                 }
             }
