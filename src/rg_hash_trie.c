@@ -211,6 +211,16 @@ int32_t rgHashTriePutU64(HashTrie* restrict _trie, Arena* restrict _arena,
     {
         return RGM_ERROR_ERR_INVALID;
     }
+    /* The uint64 specialisations store the key inline; a NOCOPY trie stores a
+     * pointer to the caller's key at (node + 1). A u64 key is a by-value local
+     * with no stable address, so NOCOPY can't represent it -- and letting an
+     * inline-key node into a NOCOPY trie makes generic/NOCOPY reads dereference
+     * key bytes as a pointer. Enforce the documented contract instead. */
+    if (_trie->m_flags & RGM_HASHTRIE_FLAG_NOCOPY)
+    {
+        RGM_FAIL("rgHashTriePutU64: unsupported on a NOCOPY trie");
+        return RGM_ERROR_ERR_INVALID;
+    }
 
     uint64_t        hfull = rgm_hash_u64(_key);
     uint64_t        h     = RGM_HASH_TRIE_DESCEND(hfull);
@@ -259,6 +269,13 @@ int32_t rgHashTrieGetU64(HashTrie* restrict _trie, uint64_t _key, uint64_t* rest
 {
     if (_trie == 0)
     {
+        return RGM_ERROR_ERR_INVALID;
+    }
+    /* NOCOPY tries store key pointers inline; the u64 read below would compare
+     * the pointer bytes against _key -> false miss. Reject (see rgHashTriePutU64). */
+    if (_trie->m_flags & RGM_HASHTRIE_FLAG_NOCOPY)
+    {
+        RGM_FAIL("rgHashTrieGetU64: unsupported on a NOCOPY trie");
         return RGM_ERROR_ERR_INVALID;
     }
 
@@ -319,6 +336,13 @@ int32_t rgHashTriePutBatchU64(HashTrie* restrict _trie, Arena* restrict _arena,
     {
         return RGM_ERROR_ERR_INVALID;
     }
+    /* Fail fast before the loop rather than on the first delegated PutU64
+     * (see rgHashTriePutU64): the u64 API is unsupported on a NOCOPY trie. */
+    if (_trie->m_flags & RGM_HASHTRIE_FLAG_NOCOPY)
+    {
+        RGM_FAIL("rgHashTriePutBatchU64: unsupported on a NOCOPY trie");
+        return RGM_ERROR_ERR_INVALID;
+    }
 
     uint32_t i;
     for (i = 0; i < _count; ++i)
@@ -340,6 +364,13 @@ int32_t rgHashTrieGetBatchU64(HashTrie* restrict _trie,
 {
     if (_trie == 0 || _keys == 0 || _outValues == 0)
     {
+        return RGM_ERROR_ERR_INVALID;
+    }
+    /* NOCOPY tries store key pointers inline; the u64 reads below would compare
+     * pointer bytes against the keys -> false misses. Reject (see rgHashTriePutU64). */
+    if (_trie->m_flags & RGM_HASHTRIE_FLAG_NOCOPY)
+    {
+        RGM_FAIL("rgHashTrieGetBatchU64: unsupported on a NOCOPY trie");
         return RGM_ERROR_ERR_INVALID;
     }
 
