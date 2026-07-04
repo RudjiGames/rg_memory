@@ -65,6 +65,11 @@ extern "C" {
         uint32_t    m_maxBlocks;
         uint32_t    m_blockSize;
         uint32_t    m_blocksFree;
+        uint32_t    m_initHigh;     /* Lazy bump watermark: blocks [m_initHigh,  */
+                                    /* m_maxBlocks) are not yet linked into the  */
+                                    /* chain and are handed out by bump-alloc.   */
+                                    /* Eager Create sets this == m_maxBlocks so  */
+                                    /* the bump path is never taken.             */
         uint8_t*    m_buffer;       /* 0 marks the FreeList as uninitialised. */
         uint8_t*    m_next;         /* Head of free chain, or 0 when empty.   */
 
@@ -565,6 +570,27 @@ extern "C" {
      */
     void rgArenaShrink(Arena* _arena);
 
+    /* Like rgArenaShrink, but retains _slackBytes of committed memory above the
+     * high-water mark before decommitting the rest. rgArenaShrink(_arena) is
+     * exactly rgArenaShrinkKeep(_arena, 0).
+     *
+     * The slack is hysteresis for oscillating / streaming workloads that grow
+     * and shrink repeatedly around a working-set size: keeping a small window
+     * committed avoids the decommit-then-recommit-then-fault churn that a
+     * zero-slack shrink causes when the next allocation immediately re-grows.
+     * Aggressive-reclaim callers (bounded-RSS mmap arenas that shrink precisely
+     * to drop cold pages) should keep using rgArenaShrink / slack 0.
+     *
+     * _slackBytes is added to the high-water mark and the sum is rounded up to
+     * the page size; a value large enough to reach the committed boundary makes
+     * this a no-op. Same file-backed / huge-page / not-live no-ops as
+     * rgArenaShrink.
+     *
+     * @param[in] _arena      - Arena to shrink.
+     * @param[in] _slackBytes - Committed bytes to retain above the high-water mark.
+     */
+    void rgArenaShrinkKeep(Arena* _arena, uint64_t _slackBytes);
+
     /* Release physical pages from the FRONT of the arena - everything strictly below _upToOffset
      * (rounded DOWN to the page size, so only fully-consumed pages are dropped). Unlike
      * rgArenaShrink (which trims the unused tail above the high-water mark), this punches a
@@ -613,6 +639,29 @@ extern "C" {
      */
     int32_t rgFreeListCreate(Arena* _arena, FreeList* _list,
                              uint64_t _blockSize, uint32_t _maxBlocks);
+
+    /* Lazy-init variant of rgFreeListCreate. Identical arguments, return codes
+     * and allocation behaviour, but does NOT walk the buffer linking every
+     * block into the free chain at create time. Instead blocks are handed out
+     * by a bump watermark on first use and only join the chain once freed.
+     *
+     * For a large pool this turns an O(_maxBlocks) pass of scattered
+     * cache-line writes (one per block, faulting every page of the buffer
+     * before it is ever used) into O(1) setup - the pages fault in lazily as
+     * blocks are actually allocated. The observable behaviour is identical to
+     * an eager list: allocation still returns blocks in ascending order
+     * (0,1,2,...) until the first Free, and Free/Alloc/queries behave the
+     * same. Prefer this for big or sparsely-used pools; the eager
+     * rgFreeListCreate remains fine for small ones.
+     *
+     * @param[in]  _arena      - Arena to allocate the block buffer from.
+     * @param[out] _list       - FreeList to initialise. Must be non-0.
+     * @param[in]  _blockSize  - Block size, in bytes.
+     * @param[in]  _maxBlocks  - Maximum number of blocks in the list.
+     * @returns Same codes as rgFreeListCreate.
+     */
+    int32_t rgFreeListCreateLazy(Arena* _arena, FreeList* _list,
+                                 uint64_t _blockSize, uint32_t _maxBlocks);
 
     /* Create a fixed-block free list using a caller-owned memory buffer.
      *

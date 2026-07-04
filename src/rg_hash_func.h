@@ -267,6 +267,95 @@ static inline uint64_t rgm_hash_wyhash(const void* _data, uint64_t _len)
     return rgm_hash_wyhash_seeded(_data, _len, RGM_HASH_WYP0);
 }
 
+/* Fused dual-seed wyhash: *_h1 = rgm_hash_wyhash_seeded(data,len,_seed1) and
+ * *_h2 = rgm_hash_wyhash_seeded(data,len,_seed2), computed in ONE pass over the key.
+ *
+ * wyhash's seed threads through the entire mixing recurrence, so the two digests
+ * cannot share the mix - but they DO share every key load and the length dispatch,
+ * which is where the time goes for long keys (the >16-byte paths reload each block
+ * once per seed otherwise; here each 48/16-byte block is read a single time and fed
+ * to both seed states). Output is byte-for-byte identical to two separate
+ * rgm_hash_wyhash_seeded calls (see the dual-seed equality test), so this is a pure
+ * speedup for any consumer that needs two independent digests of one byte key -
+ * e.g. HashIndex's (h1,h2) pair - with NO change to stored hashes or contracts. */
+static inline void rgm_hash_wyhash_dual_seeded(const void* _data, uint64_t _len,
+                                               uint64_t _seed1, uint64_t _seed2,
+                                               uint64_t* _h1, uint64_t* _h2)
+{
+    const uint8_t* p     = (const uint8_t*)_data;
+    uint64_t       seed1 = _seed1;
+    uint64_t       seed2 = _seed2;
+    uint64_t       a, b;
+
+    if (_len == 8)
+    {
+        b = rgm_hash_load_u64(p);
+        a = (b << 32) | (b >> 32);
+        *_h1 = rgm_hash_wymix(a, b ^ 8ull, RGM_HASH_WYP1, seed1);
+        *_h2 = rgm_hash_wymix(a, b ^ 8ull, RGM_HASH_WYP1, seed2);
+        return;
+    }
+
+    if (_len <= 16)
+    {
+        if (_len >= 4)
+        {
+            a = ((uint64_t)rgm_hash_load_u32(p) << 32)
+              |  (uint64_t)rgm_hash_load_u32(p + ((_len >> 3) << 2));
+            b = ((uint64_t)rgm_hash_load_u32(p + _len - 4) << 32)
+              |  (uint64_t)rgm_hash_load_u32(p + _len - 4 - ((_len >> 3) << 2));
+        }
+        else if (_len > 0)
+        {
+            a = rgm_hash_load_u3(p, _len);
+            b = 0;
+        }
+        else
+        {
+            a = 0;
+            b = 0;
+        }
+    }
+    else
+    {
+        uint64_t i = _len;
+        if (i > 48)
+        {
+            uint64_t see1_1 = seed1, see2_1 = seed1;   /* seed1's two extra mixing lanes */
+            uint64_t see1_2 = seed2, see2_2 = seed2;   /* seed2's two extra mixing lanes */
+            do
+            {
+                uint64_t l0 = rgm_hash_load_u64(p),      l1 = rgm_hash_load_u64(p +  8);
+                uint64_t l2 = rgm_hash_load_u64(p + 16), l3 = rgm_hash_load_u64(p + 24);
+                uint64_t l4 = rgm_hash_load_u64(p + 32), l5 = rgm_hash_load_u64(p + 40);
+                seed1  = rgm_hash_wymix(l0, l1, RGM_HASH_WYP1, seed1);
+                see1_1 = rgm_hash_wymix(l2, l3, RGM_HASH_WYP2, see1_1);
+                see2_1 = rgm_hash_wymix(l4, l5, RGM_HASH_WYP3, see2_1);
+                seed2  = rgm_hash_wymix(l0, l1, RGM_HASH_WYP1, seed2);
+                see1_2 = rgm_hash_wymix(l2, l3, RGM_HASH_WYP2, see1_2);
+                see2_2 = rgm_hash_wymix(l4, l5, RGM_HASH_WYP3, see2_2);
+                p += 48;
+                i -= 48;
+            } while (i > 48);
+            seed1 ^= see1_1 ^ see2_1;
+            seed2 ^= see1_2 ^ see2_2;
+        }
+        while (i > 16)
+        {
+            uint64_t l0 = rgm_hash_load_u64(p), l1 = rgm_hash_load_u64(p + 8);
+            seed1 = rgm_hash_wymix(l0, l1, RGM_HASH_WYP1, seed1);
+            seed2 = rgm_hash_wymix(l0, l1, RGM_HASH_WYP1, seed2);
+            i -= 16;
+            p += 16;
+        }
+        a = rgm_hash_load_u64(p + i - 16);
+        b = rgm_hash_load_u64(p + i -  8);
+    }
+
+    *_h1 = rgm_hash_wymix(a, b ^ (uint64_t)_len, RGM_HASH_WYP1, seed1);
+    *_h2 = rgm_hash_wymix(a, b ^ (uint64_t)_len, RGM_HASH_WYP1, seed2);
+}
+
 /* Seeded inline wyhash for an 8-byte key already in a register. The seed
  * plays the same role as in rgm_hash_wyhash_seeded -- a different seed
  * yields a statistically independent digest of the same key. Produces the

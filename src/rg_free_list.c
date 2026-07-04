@@ -73,8 +73,26 @@ static void rgm_freelist_install(FreeList* _fl, uint8_t* _buffer,
     _fl->m_maxBlocks  = _maxBlocks;
     _fl->m_blockSize  = _blockSize;
     _fl->m_blocksFree = _maxBlocks;
+    _fl->m_initHigh   = _maxBlocks;   /* all blocks pre-linked -> bump path never taken */
     _fl->m_buffer     = _buffer;
     _fl->m_next       = _buffer;
+}
+
+/* Lazy install: same field setup as rgm_freelist_install but WITHOUT the
+ * O(_maxBlocks) chain-linking pass. The free chain starts empty (m_next == 0)
+ * and every block is initially "un-initialised": rgFreeListAlloc hands them out
+ * by bumping m_initHigh from 0 upward, so a block's link word is only written
+ * once it is actually freed. Nothing here touches the buffer, so its pages stay
+ * unfaulted until real use. */
+static void rgm_freelist_install_lazy(FreeList* _fl, uint8_t* _buffer,
+                                      uint32_t _blockSize, uint32_t _maxBlocks)
+{
+    _fl->m_maxBlocks  = _maxBlocks;
+    _fl->m_blockSize  = _blockSize;
+    _fl->m_blocksFree = _maxBlocks;
+    _fl->m_initHigh   = 0;             /* nothing bumped yet; Alloc fills 0,1,2,... */
+    _fl->m_buffer     = _buffer;
+    _fl->m_next       = 0;             /* empty returned-free chain */
 }
 
 /* ------------------------------------------------------------------------- */
@@ -122,6 +140,35 @@ int32_t rgFreeListCreate(Arena* _arena, FreeList* _list,
     return RGM_ERROR_OK;
 }
 
+/* Lazy variant of rgFreeListCreate: identical validation and allocation, but the
+ * block chain is bump-filled on demand instead of linked up front (see
+ * rgm_freelist_install_lazy). O(1) setup, and the buffer's pages stay unfaulted
+ * until blocks are actually used. */
+int32_t rgFreeListCreateLazy(Arena* _arena, FreeList* _list,
+                             uint64_t _blockSize, uint32_t _maxBlocks)
+{
+    if (_list == 0 || _maxBlocks == 0)
+    {
+        return RGM_ERROR_ERR_INVALID;
+    }
+
+    uint64_t bs = rgm_freelist_effective_block_size(_blockSize);
+    if (bs == 0 || bs > SIZE_MAX / _maxBlocks)
+    {
+        return RGM_ERROR_ERR_OVERFLOW;
+    }
+
+    uint8_t* buffer = (uint8_t*)rgArenaAlloc(_arena, bs * _maxBlocks);
+    if (buffer == 0)
+    {
+        return rgArenaIsValid(_arena) ? RGM_ERROR_ERR_NO_MEMORY
+                                      : RGM_ERROR_ERR_INVALID;
+    }
+
+    rgm_freelist_install_lazy(_list, buffer, (uint32_t)bs, _maxBlocks);
+    return RGM_ERROR_OK;
+}
+
 /* Populate *_list using caller-owned _buffer; caller retains ownership. */
 int32_t rgFreeListCreateFromMemory(void* _buffer, uint64_t _bufferSize,
                                    FreeList* _list,
@@ -158,17 +205,30 @@ void* rgFreeListAlloc(FreeList* _list)
         return 0;
     }
 
-    void*    ret      = _list->m_next;
-    uint32_t next_idx = *(uint32_t*)_list->m_next;
     --_list->m_blocksFree;
 
-    /* m_maxBlocks doubles as the end-of-chain sentinel; every link in the
-     * chain is valid because Create eagerly initialised them and Free writes
-     * a real index (or the sentinel when pushing onto an empty chain). */
-    _list->m_next = (next_idx == _list->m_maxBlocks)
-                      ? 0
-                      : _list->m_buffer + (uint64_t)next_idx * _list->m_blockSize;
-    return ret;
+    /* Prefer the returned-free chain (blocks freed after use). */
+    if (_list->m_next)
+    {
+        void*    ret      = _list->m_next;
+        uint32_t next_idx = *(uint32_t*)_list->m_next;
+
+        /* m_maxBlocks doubles as the end-of-chain sentinel; every link in the
+         * chain is valid because it was written by Free (a real index, or the
+         * sentinel when pushing onto an empty chain) or by an eager Create. */
+        _list->m_next = (next_idx == _list->m_maxBlocks)
+                          ? 0
+                          : _list->m_buffer + (uint64_t)next_idx * _list->m_blockSize;
+        return ret;
+    }
+
+    /* Chain empty -> hand out the next never-initialised block by bumping the
+     * watermark (lazy lists only; an eager list has m_initHigh == m_maxBlocks,
+     * so this is unreachable there and its behaviour is unchanged). blocksFree
+     * was just verified > 0 with an empty chain, which means m_initHigh <
+     * m_maxBlocks, so the index is always in range. This yields 0,1,2,... in
+     * exactly the order an eager pre-linked chain would. */
+    return _list->m_buffer + (uint64_t)(_list->m_initHigh++) * _list->m_blockSize;
 }
 
 /* Push _ptr back onto the head of the free chain. No-op when the list is inert. */

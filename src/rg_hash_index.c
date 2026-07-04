@@ -217,8 +217,10 @@ int32_t rgHashIndexPut(HashIndex* _idx, Arena* _arena,
     {
         return RGM_ERROR_ERR_INVALID;
     }
-    uint64_t h1 = rgm_hash_wyhash(_key, _keyLen);
-    uint64_t h2 = rgm_hash_wyhash_seeded(_key, _keyLen, RGM_HASH_INDEX_H2_SEED);
+    /* One pass over the key for both digests (byte-identical to the two separate calls,
+     * so m_h2's documented RGM_HASH_INDEX_H2_SEED contract is unchanged). */
+    uint64_t h1, h2;
+    rgm_hash_wyhash_dual_seeded(_key, _keyLen, RGM_HASH_WYP0, RGM_HASH_INDEX_H2_SEED, &h1, &h2);
     return rgHashIndexPutH(_idx, _arena, h1, h2, _value);
 }
 
@@ -230,8 +232,8 @@ int32_t rgHashIndexGet(HashIndex* _idx,
     {
         return RGM_ERROR_ERR_INVALID;
     }
-    uint64_t h1 = rgm_hash_wyhash(_key, _keyLen);
-    uint64_t h2 = rgm_hash_wyhash_seeded(_key, _keyLen, RGM_HASH_INDEX_H2_SEED);
+    uint64_t h1, h2;
+    rgm_hash_wyhash_dual_seeded(_key, _keyLen, RGM_HASH_WYP0, RGM_HASH_INDEX_H2_SEED, &h1, &h2);
     return rgHashIndexGetH(_idx, h1, h2, _outValue);
 }
 

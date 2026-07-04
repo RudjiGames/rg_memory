@@ -763,8 +763,10 @@ uint64_t rgArenaCapacity(Arena* _arena)
     return rgm_arena_is_live(_arena) ? _arena->m_reserved : 0;
 }
 
-/* Decommit pages above the high-water mark. */
-void rgArenaShrink(Arena* _arena)
+/* Shared shrink core: decommit pages above the high-water mark plus _slackBytes
+ * of retained slack. rgArenaShrink is exactly _slackBytes == 0, so its behaviour
+ * is byte-for-byte unchanged. */
+static void rgm_arena_shrink_keep(Arena* _arena, uint64_t _slackBytes)
 {
     if (!rgm_arena_is_live(_arena))
     {
@@ -777,11 +779,23 @@ void rgArenaShrink(Arena* _arena)
         return;
     }
 
-    uint64_t page         = rgm_page_size();
-    uint64_t newCommitted = rgm_align_up(_arena->m_pos, page);
+    uint64_t page = rgm_page_size();
+    /* Retain the high-water mark plus the requested slack, page-aligned. The two
+     * overflow guards let a caller pass an arbitrarily large slack (up to
+     * SIZE_MAX) to mean "keep everything" without wrapping into an over-decommit. */
+    uint64_t keep = _arena->m_pos;
+    if (_slackBytes > (uint64_t)-1 - keep)
+    {
+        return;                     /* keep + slack would overflow -> retain all */
+    }
+    uint64_t newCommitted = rgm_align_up(keep + _slackBytes, page);
+    if (newCommitted < keep)
+    {
+        return;                     /* align_up wrapped near the top -> retain all */
+    }
     if (newCommitted >= _arena->m_committed)
     {
-        return; /* nothing to decommit above the high-water mark. */
+        return; /* nothing above the retained window is committed. */
     }
 
     uint8_t* decommitBase = _arena->m_base + newCommitted;
@@ -808,6 +822,19 @@ void rgArenaShrink(Arena* _arena)
 #endif
 
     _arena->m_committed = newCommitted;
+}
+
+/* Decommit pages above the high-water mark. */
+void rgArenaShrink(Arena* _arena)
+{
+    rgm_arena_shrink_keep(_arena, 0);
+}
+
+/* Decommit pages above the high-water mark, retaining _slackBytes of committed
+ * slack as hysteresis for oscillating / streaming workloads. */
+void rgArenaShrinkKeep(Arena* _arena, uint64_t _slackBytes)
+{
+    rgm_arena_shrink_keep(_arena, _slackBytes);
 }
 
 void rgArenaDecommitFront(Arena* _arena, uint64_t _upToOffset)
