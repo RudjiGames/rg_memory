@@ -333,7 +333,7 @@ typedef struct mw_writer_ctx
     int       id;
 } mw_writer_ctx;
 
-static int rgm_mw_count_cb(const void* k, size_t kl, uint64_t v, void* ud)
+static int rgm_mw_count_cb(const void* k, uint64_t kl, uint64_t v, void* ud)
 {
     (void)k; (void)kl; (void)v;
     (*(uint64_t*)ud)++;

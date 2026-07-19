@@ -297,7 +297,7 @@ typedef struct trie_foreach_ctx
     uint64_t value_sum;
 } trie_foreach_ctx;
 
-static int trie_foreach_collect(const void* key, size_t keyLen, uint64_t value, void* ud)
+static int trie_foreach_collect(const void* key, uint64_t keyLen, uint64_t value, void* ud)
 {
     trie_foreach_ctx* c = (trie_foreach_ctx*)ud;
     TEST_ASSERT_EQUAL_size_t(8, keyLen);
@@ -422,7 +422,7 @@ typedef struct nocopy_ctx
     int identity[5]; /* set when the callback key pointer == the caller's. */
 } nocopy_ctx;
 
-static int nocopy_collect(const void* key, size_t keyLen, uint64_t value, void* ud)
+static int nocopy_collect(const void* key, uint64_t keyLen, uint64_t value, void* ud)
 {
     nocopy_ctx* c = (nocopy_ctx*)ud;
     (void)keyLen; (void)value;
