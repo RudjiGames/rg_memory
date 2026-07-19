@@ -242,6 +242,16 @@ void rgFreeListFree(FreeList* _list, void* _ptr)
     /* Cheap double-free detector: catches "free the same block twice in a
      * row". Doesn't catch deeper duplicates. */
     RGM_ASSERT(_ptr != _list->m_next && "rgFreeListFree: double free");
+    /* Debug validation (mirrors rgDenseListFree): a stray/foreign pointer gets a link word scribbled
+     * through it AND is later handed back out as a block, whose garbage link word then indexes this
+     * list's buffer far out of bounds. Release trusts the caller, like the rest of the container APIs. */
+    RGM_ASSERT((uint8_t*)_ptr >= _list->m_buffer
+            && (uint8_t*)_ptr < _list->m_buffer + (uint64_t)_list->m_maxBlocks * _list->m_blockSize
+            && "rgFreeListFree: pointer outside this list's buffer");
+    RGM_ASSERT(((uint64_t)((uint8_t*)_ptr - _list->m_buffer) % _list->m_blockSize) == 0
+            && "rgFreeListFree: pointer not block-aligned");
+    RGM_ASSERT(_list->m_blocksFree < _list->m_maxBlocks
+            && "rgFreeListFree: more frees than allocated blocks");
 
     if (_list->m_next)
     {

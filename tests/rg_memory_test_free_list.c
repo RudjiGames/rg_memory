@@ -215,14 +215,23 @@ void rgMemoryTest_freeListCreateFromMemoryTooSmallFails(void)
 
 void rgMemoryTest_freeListCreateFromMemoryDoesNotTouchBufferAfterReturn(void)
 {
-    /* There's no Destroy, but the contract still says the library does not
-     * touch _buffer outside of Alloc/Free calls. Caller writes to it freely. */
+    /* There's no Destroy, but the library does not touch _buffer outside of Alloc/Free calls.
+     * NOTE the real ownership contract: the caller may write only through blocks currently
+     * ALLOCATED to it - a free block's first 4 bytes hold the in-band free-chain link and
+     * belong to the library (scribbling them corrupts the chain). So allocate a block first,
+     * write through it, and verify the write sticks and the list still round-trips. */
     static RGM_TEST_ALIGN_16 uint8_t buf[8 * 16];
     for (size_t i = 0; i < sizeof(buf); ++i) buf[i] = 0xCD;
     FreeList fl;
     TEST_ASSERT_EQUAL_INT(0, rgFreeListCreateFromMemory(buf, sizeof(buf), &fl, 16, 8));
-    buf[0] = 0xAB;
-    TEST_ASSERT_EQUAL_UINT8(0xAB, buf[0]);
+    uint8_t* block = (uint8_t*)rgFreeListAlloc(&fl);
+    TEST_ASSERT_NOT_NULL(block);
+    block[0] = 0xAB;
+    TEST_ASSERT_EQUAL_UINT8(0xAB, block[0]);
+    rgFreeListFree(&fl, block);
+    /* The chain is intact: all 8 blocks still allocate. */
+    for (int i = 0; i < 8; ++i) TEST_ASSERT_NOT_NULL(rgFreeListAlloc(&fl));
+    TEST_ASSERT_NULL(rgFreeListAlloc(&fl));
 }
 
 void rgMemoryTest_freeListCreateFromMemoryAllocFreeRoundTrip(void)

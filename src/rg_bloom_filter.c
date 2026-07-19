@@ -153,7 +153,9 @@ uint64_t rgBloomFilterBufferSize(uint64_t _bits)
 int32_t rgBloomFilterCreate(Arena* _arena, BloomFilter* _bf,
                             uint64_t _bits, uint32_t _hashCount)
 {
-    if (_bf == 0 || _bits == 0 || _hashCount == 0)
+    if (_bf == 0 || _bits == 0 || _hashCount == 0
+     || _hashCount > RGM_BLOOM_BLOCK_BYTES * 8u)   /* k > 512 cannot yield new positions in a 512-bit block: it only
+                                                    * saturates blocks (FP rate -> 1) and makes Add/Test O(k) spins */
     {
         return RGM_BLOOM_ERR_INVALID;
     }
@@ -180,7 +182,8 @@ int32_t rgBloomFilterCreateFromMemory(void* _buffer, uint64_t _bufferSize,
                                       BloomFilter* _bf,
                                       uint64_t _bits, uint32_t _hashCount)
 {
-    if (_buffer == 0 || _bf == 0 || _bits == 0 || _hashCount == 0)
+    if (_buffer == 0 || _bf == 0 || _bits == 0 || _hashCount == 0
+     || _hashCount > RGM_BLOOM_BLOCK_BYTES * 8u)   /* see rgBloomFilterCreate */
     {
         return RGM_BLOOM_ERR_INVALID;
     }

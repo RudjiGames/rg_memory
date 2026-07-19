@@ -36,7 +36,9 @@ extern "C" {
     typedef struct Arena
     {
         uint8_t*    m_base;      /* 0 marks the Arena as uninitialised. */
-        uint64_t    m_reserved;  /* total reserved bytes (page-aligned).   */
+        uint64_t    m_reserved;  /* total reserved bytes (page-aligned for  */
+                                 /* anonymous arenas; rgArenaOpenShared     */
+                                 /* stores the exact FILE size, unrounded). */
         uint64_t    m_committed; /* bytes currently committed              */
                                  /* (page-aligned; grows lazily).          */
         uint64_t    m_pos;       /* offset of next byte to allocate.       */
@@ -601,7 +603,9 @@ extern "C" {
      * behind the cursor so peak commit stays ~= one arena instead of source + destination.
      *
      *   - Windows : VirtualFree(base, len, MEM_DECOMMIT)
-     *   - POSIX   : madvise(base, len, MADV_DONTNEED)
+     *   - POSIX   : madvise(base, len, MADV_DONTNEED) + mprotect(PROT_NONE), so a stray
+     *               access below _upToOffset traps like it does on Windows instead of
+     *               silently refaulting zero pages
      *
      * No-op on 0/uninitialised/file-backed arenas, or when nothing is fully consumed yet.
      *
@@ -1225,8 +1229,9 @@ extern "C" {
      * visited; values overwritten concurrently are seen as old-or-new
      * (never torn) per the standard HashTrie value-update contract.
      *
-     * Traversal uses a fixed 64-frame stack; see rgHashMapForEach for the
-     * depth-overflow behaviour (debug trap / release skip).
+     * Traversal uses a fixed 64-frame stack; chains deeper than 64 levels
+     * (engineered-collision territory) fall back to plain recursion so no
+     * entry is ever silently dropped (debug builds also trap for visibility).
      *
      * @returns Number of entries visited.
      */
@@ -1342,8 +1347,8 @@ extern "C" {
     /* Visit every entry. Same snapshot-like semantics as
      * rgHashTrieForEach: entries published before the call are visited,
      * concurrent inserts may be missed, value updates are old-or-new.
-     * Same fixed 64-frame traversal stack as rgHashMapForEach (debug
-     * trap / release skip on depth overflow). */
+     * Same fixed 64-frame traversal stack as rgHashMapForEach (on depth
+     * overflow: recursive fallback so entries are never dropped; debug trap). */
     uint64_t rgHashIndexForEach(HashIndex* _idx, rgHashIndexForEachFn _fn,
                                 void* _userData);
 
@@ -1368,11 +1373,14 @@ extern "C" {
  * library rounds bits up to the next power of two, so the actual fill
  * ratio (and effective FP rate) is at most 2x better than requested.
  *
- * Hashing: double-hashing (Kirsch & Mitzenmacher, 2006). The byte-key
- * Add / Test path computes h1 = wyhash(key) and derives h2 by mixing h1
- * with a perturbation constant; the k indices are then (h1 + i*h2) mod m
- * for i in [0, k). Callers with pre-hashed identifiers (UUIDs, content
- * hashes) skip the hashing via the H variants.
+ * Hashing: BLOCKED double-hashing (Kirsch & Mitzenmacher, 2006, on a
+ * cache-line block). The byte-key Add / Test path computes (h1, h2) as the
+ * two halves of one 128-bit wyhash multiply; h1 picks the 512-bit block,
+ * and the k in-block bit positions are (h2.bits0-8 + i*(h2.bits32-40|1))
+ * mod 512 for i in [0, k) - one cache line touched per Add / Test. Callers
+ * with pre-hashed identifiers (UUIDs, content hashes) skip the hashing via
+ * the H variants; note only h1's block-selection bits and h2's bits 0-8 /
+ * 32-40 are consumed, so supply well-mixed values in those positions.
  *------------------------------------------------------------------------*/
 
     /* Compute the buffer size rgBloomFilterCreateFromMemory would require.

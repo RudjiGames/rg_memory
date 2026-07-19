@@ -374,7 +374,9 @@ int32_t rgHashTrieGetBatchU64(HashTrie* restrict _trie,
         return RGM_ERROR_ERR_INVALID;
     }
 
-    int32_t hits = 0;
+    /* 64-bit accumulator: _count is u32, so > 2^31 hits would overflow int32 (negative return
+     * colliding with RGM_ERROR_*). Clamped at return. */
+    uint64_t hits = 0;
 
     uint64_t              hfull[RGM_HASH_TRIE_BATCH_K];
     uint64_t              h    [RGM_HASH_TRIE_BATCH_K];
@@ -435,7 +437,7 @@ int32_t rgHashTrieGetBatchU64(HashTrie* restrict _trie,
         }
     }
 
-    return hits;
+    return hits > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)hits;
 }
 
 /* -------------------------------------------------------------------------

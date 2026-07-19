@@ -161,7 +161,13 @@ int32_t rgHashMapInit(HashMap* _map, Arena* _arena)
          * itself is never dereferenced; it just keeps offset 0 free
          * to serve as the "empty slot" marker. */
         uint8_t* sentinel = (uint8_t*)rgArenaAllocAligned(_arena, RGM_CACHE_LINE, RGM_CACHE_LINE);
-        if (sentinel != 0)
+        if (sentinel == 0)
+        {
+            /* Without the sentinel the first node would land at offset 0 = the "empty slot"
+             * marker: its publish would be invisible (unreachable entry, re-Put allocates
+             * forever). Init MUST fail rather than hand back a silently-broken map. */
+            return RGM_ERROR_ERR_NO_MEMORY;
+        }
         {
             /* Zero it: rgArenaClear keeps committed pages, so an arena being
              * reused for a fresh map may still hold a persist header from a
@@ -247,13 +253,19 @@ int32_t rgHashMapSave(HashMap* _map)
 
     rgm_hash_map_persist_header* hdr = (rgm_hash_map_persist_header*)base;
 
-    /* Reuse the index region across re-saves; allocate it once otherwise. */
+    /* Reuse the index region across re-saves; allocate it once otherwise. The header bytes may come from
+     * an UNTRUSTED mapped file (OpenShared + Init instead of Open), so the reused offset must be fully
+     * bounds-checked like Open does - without the cap check a hostile m_indexOffset makes the index copy
+     * below a 16 KiB out-of-bounds write. A failed check just falls through to a fresh allocation. */
+    uint64_t cap = rgArenaCapacity(arena);
     uint32_t indexOffset;
     if (hdr->m_magic == RGM_HASHMAP_MAGIC
      && hdr->m_version == RGM_HASHMAP_PERSIST_VERSION
      && hdr->m_topBits == RGM_HASH_MAP_INDEX_TOPBITS
-     && hdr->m_indexOffset != 0
-     && hdr->m_indexOffset <= UINT32_MAX)
+     && hdr->m_indexOffset >= RGM_CACHE_LINE
+     && hdr->m_indexOffset <= UINT32_MAX
+     && hdr->m_indexOffset <= cap
+     && RGM_HASH_MAP_INDEX_BYTES <= cap - hdr->m_indexOffset)
     {
         indexOffset = (uint32_t)hdr->m_indexOffset;
     }
@@ -296,22 +308,34 @@ int32_t rgHashMapOpen(HashMap* _map, Arena* _arena)
         return RGM_ERROR_ERR_INVALID;
     }
 
+    /* The header read below touches the first 32 bytes: on a reserve-only anonymous arena (nothing
+     * committed yet) that dereference would FAULT before any validation ran. Reject uncommitted
+     * arenas up front - a valid persisted map always has at least the sentinel line committed. */
+    if (_arena->m_committed < sizeof(rgm_hash_map_persist_header))
+    {
+        return RGM_ERROR_ERR_FORMAT;
+    }
+
     uint8_t* base = _arena->m_base;
     const rgm_hash_map_persist_header* hdr = (const rgm_hash_map_persist_header*)base;
 
     /* All header fields come from an untrusted file; the bounds checks are
      * phrased so a huge m_indexOffset cannot wrap the addition and slip
      * past. Save stores offsets as uint32_t, so anything above UINT32_MAX
-     * is corrupt by definition. */
+     * is corrupt by definition. Consistency checks: the index region must sit
+     * ABOVE the sentinel line (else it aliases this header) and the restored
+     * high-water must cover it (else the next Put's node lands inside the
+     * persisted header/index/nodes region - in-bounds but silently corrupting). */
     uint64_t cap = rgArenaCapacity(_arena);
     if (hdr->m_magic != RGM_HASHMAP_MAGIC
      || hdr->m_version != RGM_HASHMAP_PERSIST_VERSION
      || hdr->m_topBits != RGM_HASH_MAP_INDEX_TOPBITS
-     || hdr->m_indexOffset == 0
+     || hdr->m_indexOffset < RGM_CACHE_LINE
      || hdr->m_indexOffset > UINT32_MAX
      || hdr->m_indexOffset > cap
      || RGM_HASH_MAP_INDEX_BYTES > cap - hdr->m_indexOffset
-     || hdr->m_highWater > cap)
+     || hdr->m_highWater > cap
+     || hdr->m_highWater < hdr->m_indexOffset + RGM_HASH_MAP_INDEX_BYTES)
     {
         return RGM_ERROR_ERR_FORMAT;
     }
@@ -545,7 +569,9 @@ int32_t rgHashMapGetBatchU64(HashMap* restrict _map,
     }
 
     uint8_t* base = _map->m_arena->m_base;
-    int32_t  hits = 0;
+    /* 64-bit accumulator: _count is u32, so > 2^31 hits in one call would overflow a plain int32
+     * (UB, and a negative return colliding with the RGM_ERROR_* codes). Clamped at return. */
+    uint64_t hits = 0;
 
     uint64_t        hfull[RGM_HASH_BATCH_K];
     uint64_t        h    [RGM_HASH_BATCH_K];
@@ -605,7 +631,7 @@ int32_t rgHashMapGetBatchU64(HashMap* restrict _map,
         }
     }
 
-    return hits;
+    return hits > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)hits;
 }
 
 /* -------------------------------------------------------------------------

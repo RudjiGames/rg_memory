@@ -347,7 +347,7 @@ typedef struct foreach_ctx
     int      stop_at;
 } foreach_ctx;
 
-static int foreach_collect(const void* key, size_t keyLen, uint64_t value, void* ud)
+static int foreach_collect(const void* key, uint64_t keyLen, uint64_t value, void* ud)
 {
     foreach_ctx* c = (foreach_ctx*)ud;
     TEST_ASSERT_EQUAL_size_t(8, keyLen);

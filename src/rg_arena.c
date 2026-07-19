@@ -49,27 +49,33 @@ static uint64_t rgm_align_padding(uintptr_t _addr, uint64_t _align)
  * Virtual memory primitives.
  * ------------------------------------------------------------------------- */
 
-static uint64_t s_pageSize = 0;
+/* Atomic: arenas are single-threaded per instance, but DIFFERENT arenas are used from different threads
+ * concurrently (one-arena-per-thread HashTrie MT model), and the first commit on each races this lazy init.
+ * Both racers compute the same value, so the race was value-benign - but a plain read-check-write is still a
+ * formal data race (UB, and TSan flags it). Atomic load/store makes it well-defined at zero practical cost. */
+static rgm_atomic_i64 s_pageSize = 0;
 
 /* Query the OS page size; cached after the first call. */
 static uint64_t rgm_page_size(void)
 {
-    if (s_pageSize == 0)
+    int64_t ps = rgm_atomic_load_i64(&s_pageSize);
+    if (ps == 0)
     {
 #if RGM_PLATFORM_WINDOWS
         SYSTEM_INFO si;
         GetSystemInfo(&si);
-        s_pageSize = (uint64_t)si.dwPageSize;
+        ps = (int64_t)si.dwPageSize;
 #else
         /* sysconf(_SC_PAGESIZE) supersedes the XSI-deprecated getpagesize();
          * keep the result in a signed type so a sysconf failure (-1) is
          * caught by the > 0 check below before we cast to unsigned. 4 KiB
          * is the safe floor on every Linux/BSD/Darwin target. */
         long pageSize = sysconf(_SC_PAGESIZE);
-        s_pageSize = pageSize > 0 ? (uint64_t)pageSize : 4096;
+        ps = pageSize > 0 ? (int64_t)pageSize : 4096;
 #endif
+        rgm_atomic_store_i64(&s_pageSize, ps);
     }
-    return s_pageSize;
+    return (uint64_t)ps;
 }
 
 /* Result from rgm_vm_reserve: base, size actually reserved (may exceed
@@ -102,6 +108,16 @@ static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
     r.base      = 0;
     r.reserved  = 0;
     r.committed = 0;
+
+#if SIZE_MAX < UINT64_MAX
+    /* 32-bit target: the OS calls below take size_t/SIZE_T, so a >4GB request would silently truncate at the
+     * call while the bookkeeping recorded the full 64-bit value - capacity lies, and allocations bound-checked
+     * against m_reserved land in unreserved space. Reject instead. */
+    if (_bytes > (uint64_t)SIZE_MAX)
+    {
+        return r;
+    }
+#endif
 
 #if RGM_PLATFORM_WINDOWS
     /* Try huge pages first. They require eager commit on Windows -- the
@@ -271,6 +287,20 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             size = (uint64_t)li.QuadPart;
         }
 
+#if SIZE_MAX < UINT64_MAX
+        /* 32-bit target: MapViewOfFile takes a SIZE_T view size - a >4GB file would map a truncated view while
+         * m_reserved/m_committed recorded the full size, and offset walks past the view would fault. Reject. */
+        if (size > (uint64_t)SIZE_MAX)
+        {
+            CloseHandle(f);
+            if (!_openExisting && !(attr & FILE_FLAG_DELETE_ON_CLOSE))
+            {
+                DeleteFileA(_path);
+            }
+            return r;
+        }
+#endif
+
         {
             DWORD  prot = _readOnly ? PAGE_READONLY : PAGE_READWRITE;
             /* On create, the max-size args grow the file to `size`; on open,
@@ -282,6 +312,12 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             if (map == 0)
             {
                 CloseHandle(f);
+                /* Don't leave a zero/partial file behind on a failed create (DELETE_ON_CLOSE
+                 * self-cleans when active; open-existing never created anything). */
+                if (!_openExisting && !(attr & FILE_FLAG_DELETE_ON_CLOSE))
+                {
+                    DeleteFileA(_path);
+                }
                 return r;
             }
             {
@@ -292,6 +328,10 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
                 CloseHandle(f);
                 if (base == 0)
                 {
+                    if (!_openExisting && !(attr & FILE_FLAG_DELETE_ON_CLOSE))
+                    {
+                        DeleteFileA(_path);
+                    }
                     return r;
                 }
                 r.base      = base;
@@ -332,8 +372,26 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
         else if (ftruncate(fd, (off_t)size) != 0)
         {
             close(fd);
+            if (!_deleteOnClose)   /* don't leave a zero/partial file behind on a failed create */
+            {
+                unlink(_path);
+            }
             return r;
         }
+
+#if SIZE_MAX < UINT64_MAX
+        /* 32-bit target: mmap takes a size_t length - a >4GB file would map a truncated view while
+         * m_reserved/m_committed recorded the full size. Reject. */
+        if (size > (uint64_t)SIZE_MAX)
+        {
+            close(fd);
+            if (!_openExisting && !_deleteOnClose)
+            {
+                unlink(_path);
+            }
+            return r;
+        }
+#endif
 
         {
             int   prot = PROT_READ | (_readOnly ? 0 : PROT_WRITE);
@@ -342,6 +400,10 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             close(fd);
             if (base == MAP_FAILED)
             {
+                if (!_openExisting && !_deleteOnClose)
+                {
+                    unlink(_path);
+                }
                 return r;
             }
             r.base      = base;
@@ -436,6 +498,13 @@ static void* rgm_arena_alloc_internal(Arena* _a, uint64_t _size, uint64_t _align
     if (_align < 8)
     {
         _align = 8;
+    }
+    /* The assert above compiles out in release: reject non-pow2 explicitly there too - the padding mask
+     * math below is only valid for powers of two, and a garbage-padded (misaligned) pointer would corrupt
+     * SIMD/atomic users. (< 8 values were clamped first, so legacy 1/2/4 - and 0-as-default - still work.) */
+    if (_align & (_align - 1))
+    {
+        return 0;
     }
 
     /* Align pos up so the returned pointer satisfies _align. */
