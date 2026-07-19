@@ -217,8 +217,8 @@ void rgMemoryTest_freeListCreateFromMemoryDoesNotTouchBufferAfterReturn(void)
 {
     /* There's no Destroy, but the library does not touch _buffer outside of Alloc/Free calls.
      * NOTE the real ownership contract: the caller may write only through blocks currently
-     * ALLOCATED to it - a free block's first 4 bytes hold the in-band free-chain link and
-     * belong to the library (scribbling them corrupts the chain). So allocate a block first,
+     * ALLOCATED to it - a free block's first bytes hold the in-band free-chain link (a
+     * pointer) and belong to the library (scribbling them corrupts the chain). So allocate a block first,
      * write through it, and verify the write sticks and the list still round-trips. */
     static RGM_TEST_ALIGN_16 uint8_t buf[8 * 16];
     for (size_t i = 0; i < sizeof(buf); ++i) buf[i] = 0xCD;

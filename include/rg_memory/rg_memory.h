@@ -9,6 +9,22 @@
 
 #include <stdint.h> /* uint*_t */
 
+/* Keep neighbouring Arena instances on separate 64-byte cache lines. The bump
+ * pointer m_pos is written on EVERY allocation, so two arenas packed in one
+ * line (e.g. the per-worker `Arena scratch[N]` arrays the parallel decoders
+ * use) would ping-pong that line between cores on every alloc -- classic false
+ * sharing entirely off the data path. Mirrors RGM_CACHE_LINE (64) in the
+ * private platform header. */
+#ifndef RG_MEMORY_CACHE_ALIGN
+#   if defined(_MSC_VER)
+#       define RG_MEMORY_CACHE_ALIGN __declspec(align(64))
+#   elif defined(__GNUC__) || defined(__clang__)
+#       define RG_MEMORY_CACHE_ALIGN __attribute__((aligned(64)))
+#   else
+#       define RG_MEMORY_CACHE_ALIGN
+#   endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
@@ -32,8 +48,15 @@ extern "C" {
      *
      * Treat the fields as private to the implementation; do not read or
      * mutate them directly.
+     *
+     * Cache-line aligned (64 B) so per-thread arena arrays don't false-share
+     * the hot m_pos store across cores; see RG_MEMORY_CACHE_ALIGN above.
      */
-    typedef struct Arena
+#if defined(_MSC_VER)
+#   pragma warning(push)
+#   pragma warning(disable: 4324) /* padded due to alignment specifier -- intentional */
+#endif
+    typedef struct RG_MEMORY_CACHE_ALIGN Arena
     {
         uint8_t*    m_base;      /* 0 marks the Arena as uninitialised. */
         uint64_t    m_reserved;  /* total reserved bytes (page-aligned for  */
@@ -48,6 +71,9 @@ extern "C" {
                                  /* (the mapping outlives a closed handle).*/
 
     } Arena;
+#if defined(_MSC_VER)
+#   pragma warning(pop)
+#endif
 
     /* Free list control state.
      *
@@ -477,6 +503,45 @@ extern "C" {
      * @returns Pointer to the allocated block, or 0 on failure.
      */
     void* rgArenaAllocAligned(Arena* _arena, uint64_t _size, uint64_t _alignment);
+
+    /* Header-inlined fast path for the default (16-byte) allocation.
+     *
+     * Identical in every observable respect to rgArenaAlloc -- same 16-byte
+     * result, same uint64_t-wrap guard, same no-op on a zero size / 0 /
+     * uninitialised arena -- but bumps the pointer inline so hot loops in other
+     * translation units avoid a cross-module call+ret on every allocation (the
+     * library is built without whole-program optimisation, so the exported
+     * rgArenaAlloc cannot be inlined into its callers). Any case the fast path
+     * does not satisfy falls through to the exported rgArenaAlloc, so behaviour
+     * never diverges. Keep the bump math in lock-step with rgArenaAlloc's fast
+     * path in rg_arena.c.
+     *
+     * Opt-in: existing call sites keep calling rgArenaAlloc unchanged; adopt
+     * this only where a profile shows the call overhead in a tight alloc loop.
+     *
+     * @param[in] _arena - Arena to allocate from.
+     * @param[in] _size  - Number of bytes to allocate.
+     * @returns Pointer to the 16-byte-aligned block, or 0 on the same
+     *          conditions as rgArenaAlloc.
+     */
+    static inline void* rgArenaAllocFast(Arena* _arena, uint64_t _size)
+    {
+        if (_arena != 0 && _arena->m_base != 0 && _size != 0)
+        {
+            /* Mirror rgArenaAlloc exactly: pad from base+pos (not pos alone) so
+             * the result is byte-identical regardless of the base's alignment. */
+            uintptr_t target   = (uintptr_t)_arena->m_base + (uintptr_t)_arena->m_pos;
+            uint64_t  pad      = (uint64_t)(((uintptr_t)0 - target) & (uintptr_t)15u);
+            uint64_t  user_off = _arena->m_pos + pad;
+            uint64_t  new_pos  = user_off + _size;
+            if (new_pos >= user_off && new_pos <= _arena->m_committed)
+            {
+                _arena->m_pos = new_pos;
+                return _arena->m_base + user_off;
+            }
+        }
+        return rgArenaAlloc(_arena, _size);
+    }
 
     /* Pop the most recent allocation off the arena by size.
      *

@@ -238,12 +238,30 @@ static RGM_FORCEINLINE void rgm_bloom_add_h(BloomFilter* _bf, uint64_t _h1, uint
 
     uint32_t k = _bf->m_hashCount;
     uint32_t i;
+
+    /* All k bits land in this one 512-bit block (8 words / one cache line).
+     * Fold them into a per-word mask first, then issue at most 8 locked ORs
+     * (one per touched word) instead of one locked RMW per bit -- a strict
+     * reduction whenever two positions share a word, and a guaranteed
+     * k -> <=8 reduction for k > 8. On 32-bit x86 each rgm_atomic_or_i64 is a
+     * cmpxchg8b retry loop, so collapsing the count matters more there.
+     * Monotone-OR semantics and per-word release ordering are preserved. */
+    uint64_t wmask[RGM_BLOOM_BLOCK_WORDS];
+    for (i = 0; i < RGM_BLOOM_BLOCK_WORDS; ++i)
+    {
+        wmask[i] = 0;
+    }
     for (i = 0; i < k; ++i)
     {
-        uint32_t word = pos >> 6;
-        int64_t  m    = (int64_t)(1ull << (pos & 63u));
-        rgm_atomic_or_i64((rgm_atomic_i64*)&block[word], m);
+        wmask[pos >> 6] |= 1ull << (pos & 63u);
         pos = (pos + delta) & (uint32_t)RGM_BLOOM_BLOCK_BIT_MASK;
+    }
+    for (i = 0; i < RGM_BLOOM_BLOCK_WORDS; ++i)
+    {
+        if (wmask[i] != 0)
+        {
+            rgm_atomic_or_i64((rgm_atomic_i64*)&block[i], (int64_t)wmask[i]);
+        }
     }
 }
 

@@ -70,14 +70,25 @@ static RGM_FORCEINLINE const uint8_t* rgm_hash_node_key_ext(const HashNode* _nod
     return (const uint8_t*)(_node + 1);
 }
 
-/* Byte-equality test for keys. Manual loop to keep the file CRT-free
- * (matches the style of rg_dense_list.c's swap-back copy). */
+/* Equality test for keys. Runs only after the m_hash + m_keyLen fast-reject,
+ * i.e. ~once per lookup HIT, and hits dominate symbol-intern / string-table
+ * traffic -- so it pays to compare 8 bytes at a time instead of one. Reads
+ * stay strictly within [0,_len) on BOTH operands (block loop + byte tail), so
+ * there is no over-read past either buffer's end. CRT-free, matching the
+ * file's style. */
 static RGM_FORCEINLINE int rgm_hash_keys_equal(const void* _a, const void* _b, uint64_t _len)
 {
     const uint8_t* pa = (const uint8_t*)_a;
     const uint8_t* pb = (const uint8_t*)_b;
-    uint64_t i;
-    for (i = 0; i < _len; ++i)
+    uint64_t i = 0;
+    for (; i + 8u <= _len; i += 8u)
+    {
+        if (rgm_hash_load_u64(pa + i) != rgm_hash_load_u64(pb + i))
+        {
+            return 0;
+        }
+    }
+    for (; i < _len; ++i)
     {
         if (pa[i] != pb[i])
         {

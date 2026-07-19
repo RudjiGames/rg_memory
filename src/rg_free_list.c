@@ -16,10 +16,13 @@
  *     reclaim it. The FreeList struct itself lives wherever the caller
  *     puts it and outlives nothing in particular.
  *   - The free chain is stored inside the free blocks themselves: each
- *     free block holds the index of the next free block (or m_maxBlocks
- *     as the end-of-chain sentinel). Block size is clamped up to
- *     sizeof(uint32_t) and rounded up to 16 so block N starts on a
- *     16-byte boundary (matching the arena's default alignment).
+ *     free block holds a POINTER to the next free block (or 0 as the
+ *     end-of-chain sentinel). Block size is clamped up to sizeof(uint32_t)
+ *     and rounded up to 16 so block N starts on a 16-byte boundary
+ *     (matching the arena's default alignment); the 16-byte floor also
+ *     guarantees room for the in-band pointer link on every target
+ *     (4/8-byte pointers). Storing the successor address directly keeps
+ *     Alloc/Free branch- and division-free (no index<->address conversion).
  *   - Create eagerly links every block into the chain. A single linear
  *     pass over the buffer at create time lets Alloc skip any lazy-init
  *     branch on the hot path.
@@ -66,9 +69,10 @@ static void rgm_freelist_install(FreeList* _fl, uint8_t* _buffer,
 {
     for (uint32_t i = 0; i + 1u < _maxBlocks; ++i)
     {
-        *(uint32_t*)(_buffer + (uint64_t)i * _blockSize) = i + 1u;
+        *(uint8_t**)(_buffer + (uint64_t)i * _blockSize) =
+            _buffer + (uint64_t)(i + 1u) * _blockSize;
     }
-    *(uint32_t*)(_buffer + (uint64_t)(_maxBlocks - 1u) * _blockSize) = _maxBlocks;
+    *(uint8_t**)(_buffer + (uint64_t)(_maxBlocks - 1u) * _blockSize) = 0; /* end-of-chain */
 
     _fl->m_maxBlocks  = _maxBlocks;
     _fl->m_blockSize  = _blockSize;
@@ -210,15 +214,12 @@ void* rgFreeListAlloc(FreeList* _list)
     /* Prefer the returned-free chain (blocks freed after use). */
     if (_list->m_next)
     {
-        void*    ret      = _list->m_next;
-        uint32_t next_idx = *(uint32_t*)_list->m_next;
+        void* ret = _list->m_next;
 
-        /* m_maxBlocks doubles as the end-of-chain sentinel; every link in the
-         * chain is valid because it was written by Free (a real index, or the
-         * sentinel when pushing onto an empty chain) or by an eager Create. */
-        _list->m_next = (next_idx == _list->m_maxBlocks)
-                          ? 0
-                          : _list->m_buffer + (uint64_t)next_idx * _list->m_blockSize;
+        /* The link word holds the successor's address directly (0 == end of
+         * chain); every link was written by Free or by an eager Create. No
+         * multiply, no sentinel compare. */
+        _list->m_next = *(uint8_t**)_list->m_next;
         return ret;
     }
 
@@ -253,18 +254,11 @@ void rgFreeListFree(FreeList* _list, void* _ptr)
     RGM_ASSERT(_list->m_blocksFree < _list->m_maxBlocks
             && "rgFreeListFree: more frees than allocated blocks");
 
-    if (_list->m_next)
-    {
-        uint32_t index   = (uint32_t)((_list->m_next - _list->m_buffer)
-                                      / _list->m_blockSize);
-        *(uint32_t*)_ptr  = index;
-        _list->m_next = (uint8_t*)_ptr;
-    }
-    else
-    {
-        *(uint32_t*)_ptr  = _list->m_maxBlocks;
-        _list->m_next = (uint8_t*)_ptr;
-    }
+    /* Push _ptr onto the head: its link word points at the old head (0 when
+     * the chain was empty, which then becomes the new end-of-chain sentinel).
+     * No division, no branch. */
+    *(uint8_t**)_ptr = _list->m_next;
+    _list->m_next    = (uint8_t*)_ptr;
     ++_list->m_blocksFree;
 }
 
