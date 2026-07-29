@@ -275,6 +275,18 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             return r;
         }
 
+        if (_deleteOnClose && !_openExisting)
+        {
+            /* OPSCALE NTFS caveat hardening: mark scratch temp files SPARSE before the mapping sizes
+             * them, so a huge lazy reserve (8-64 GB per arena) costs zero physical disk until pages are
+             * actually written - including on volumes where CreateFileMapping would otherwise eagerly
+             * allocate the full reserve. Best-effort: filesystems without sparse support (exFAT/FAT32)
+             * fail the ioctl and keep the eager behavior (OMNI_OPS_MMAP=0 remains the opt-out there).
+             * Persistent shared files (_deleteOnClose == 0, e.g. the PDB cache) are left non-sparse. */
+            DWORD br = 0;
+            DeviceIoControl(f, FSCTL_SET_SPARSE, 0, 0, 0, 0, &br, 0);
+        }
+
         uint64_t size = _bytes;
         if (_openExisting)
         {

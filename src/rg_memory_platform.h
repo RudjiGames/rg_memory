@@ -47,6 +47,7 @@
 #       define NOMINMAX
 #   endif
 #   include <windows.h>
+#   include <winioctl.h>	/* FSCTL_SET_SPARSE: lazy-allocated arena scratch files (rg_arena.c) */
 #   if defined(_MSC_VER)
 #       include <intrin.h>
 #   endif
