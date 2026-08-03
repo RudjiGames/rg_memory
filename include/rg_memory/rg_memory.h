@@ -466,6 +466,26 @@ extern "C" {
      */
     int rgArenaIsValid(Arena* _arena);
 
+    /* Does the volume holding _path support SPARSE files?
+     *
+     * rgArenaCreateSharedTemp marks its temp files sparse so a large lazy
+     * reserve costs no physical disk until pages are written. Where that is
+     * unsupported (exFAT / FAT32, some network filesystems) the full reserve is
+     * allocated eagerly instead, so a caller that would otherwise over-reserve
+     * should size the file exactly.
+     *
+     * Capability, NOT filesystem name: ReFS and Dev Drives support sparse and
+     * must not be treated like exFAT.
+     *
+     * _path need not exist yet - the volume is resolved from its longest
+     * existing prefix - but its directory should.
+     *
+     * @param[in] _path - File or directory path on the volume to test.
+     * @returns 1 supported, 0 not supported, -1 undetermined (caller decides;
+     *          treating -1 as supported preserves the lazy-reserve behaviour).
+     */
+    int32_t rgVmPathSupportsSparse(const char* _path);
+
     /* Destroy an arena, decommitting and releasing all memory it owns.
      *
      * Sets *_arena to the uninitialised state so subsequent API calls

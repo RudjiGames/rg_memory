@@ -676,6 +676,38 @@ int rgArenaIsValid(Arena* _arena)
     return rgm_arena_is_live(_arena) ? 1 : 0;
 }
 
+/* Sparse-file support for the volume holding _path. See the header: this is a
+ * CAPABILITY query, not a filesystem-name check - ReFS and Dev Drives support
+ * sparse files and must not be lumped in with exFAT. */
+int32_t rgVmPathSupportsSparse(const char* _path)
+{
+#if RGM_PLATFORM_WINDOWS
+    char  root[MAX_PATH];
+    DWORD flags = 0;
+
+    if (!_path || !_path[0])
+    {
+        return -1;
+    }
+    /* Resolve the mount point (works on a path that does not exist yet, as long
+     * as an ancestor does - which is the case for a temp-file prefix). */
+    if (!GetVolumePathNameA(_path, root, (DWORD)sizeof(root)))
+    {
+        return -1;
+    }
+    if (!GetVolumeInformationA(root, 0, 0, 0, 0, &flags, 0, 0))
+    {
+        return -1;
+    }
+    return (flags & FILE_SUPPORTS_SPARSE_FILES) ? 1 : 0;
+#else
+    /* POSIX regular files are sparse by default: a truncate-grown file
+     * allocates blocks only where written. */
+    (void)_path;
+    return 1;
+#endif
+}
+
 /* Release the VM reservation and put *_arena back into the inert state.
  * Idempotent and 0-safe. */
 void rgArenaDestroy(Arena* _arena)
