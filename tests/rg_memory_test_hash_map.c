@@ -567,6 +567,39 @@ void rgMemoryTest_hashMapBatchMatchesSingle(void)
     rgArenaDestroy(&a);
 }
 
+/* Key compare uses overlapping tail loads now: keys of every length 1..40
+ * that differ only in one byte (first, middle or last) must not match. */
+void rgMemoryTest_hashMapKeyCompareAllLengths(void)
+{
+    Arena a;
+    rgArenaCreate(&a, 4 * 1024 * 1024);
+    HashMap m;
+    rgHashMapInit(&m, &a);
+    uint8_t key[40];
+    uint32_t len, i;
+    for (len = 1; len <= 40; ++len)
+    {
+        for (i = 0; i < len; ++i) key[i] = (uint8_t)(len * 3 + i);
+        *rgHashMapPut(&m, key, len) = len;
+    }
+    for (len = 1; len <= 40; ++len)
+    {
+        for (i = 0; i < len; ++i) key[i] = (uint8_t)(len * 3 + i);
+        uint64_t* v = rgHashMapGet(&m, key, len);
+        TEST_ASSERT_NOT_NULL(v);
+        TEST_ASSERT_EQUAL_UINT64(len, *v);
+        uint32_t pos[3] = { 0, len / 2, len - 1 };
+        uint32_t p;
+        for (p = 0; p < 3; ++p)
+        {
+            key[pos[p]] ^= 0x40;
+            TEST_ASSERT_NULL(rgHashMapGet(&m, key, len));
+            key[pos[p]] ^= 0x40;
+        }
+    }
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Entry point invoked from rg_memory_test.c
  * ------------------------------------------------------------------------- */
@@ -604,4 +637,5 @@ void rgMemoryTest_HashMap(void)
     RUN_TEST(rgMemoryTest_hashMapGetBatchU64HandlesMisses);
     RUN_TEST(rgMemoryTest_hashMapGetBatchU64NullOutFound);
     RUN_TEST(rgMemoryTest_hashMapBatchMatchesSingle);
+    RUN_TEST(rgMemoryTest_hashMapKeyCompareAllLengths);
 }

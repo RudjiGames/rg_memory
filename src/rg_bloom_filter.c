@@ -222,9 +222,14 @@ void rgBloomFilterClear(BloomFilter* _bf)
 /* ------------------------------------------------------------------------- */
 
 /* Add k bits derived from (h1, h2) inside one 512-bit block. h1 selects
- * the block; h2 seeds the in-block double-hashing. Release-ordered atomic
- * OR so concurrent Test readers see the bits via acquire load. */
-static RGM_FORCEINLINE void rgm_bloom_add_h(BloomFilter* _bf, uint64_t _h1, uint64_t _h2)
+ * the block; h2 seeds the in-block double-hashing. With _atomic != 0 each
+ * word is set with a release-ordered atomic OR so concurrent Test readers
+ * see the bits via acquire load. With _atomic == 0 (the Unsync API; a
+ * compile-time constant at every call site) the words are plain ORs, which
+ * is several times cheaper but only valid while no other thread touches the
+ * filter. */
+static RGM_FORCEINLINE void rgm_bloom_add_h(BloomFilter* _bf, uint64_t _h1, uint64_t _h2,
+                                            int _atomic)
 {
     uint64_t  block_idx = _h1 & _bf->m_blockMask;
     uint64_t* block     = _bf->m_bits + (uint64_t)block_idx * RGM_BLOOM_BLOCK_WORDS;
@@ -255,6 +260,14 @@ static RGM_FORCEINLINE void rgm_bloom_add_h(BloomFilter* _bf, uint64_t _h1, uint
     {
         wmask[pos >> 6] |= 1ull << (pos & 63u);
         pos = (pos + delta) & (uint32_t)RGM_BLOOM_BLOCK_BIT_MASK;
+    }
+    if (!_atomic)
+    {
+        for (i = 0; i < RGM_BLOOM_BLOCK_WORDS; ++i)
+        {
+            block[i] |= wmask[i];
+        }
+        return;
     }
     for (i = 0; i < RGM_BLOOM_BLOCK_WORDS; ++i)
     {
@@ -305,7 +318,7 @@ void rgBloomFilterAddH(BloomFilter* _bf, uint64_t _h1, uint64_t _h2)
     {
         return;
     }
-    rgm_bloom_add_h(_bf, _h1, _h2);
+    rgm_bloom_add_h(_bf, _h1, _h2, 1);
 }
 
 void rgBloomFilterAddU64(BloomFilter* _bf, uint64_t _key)
@@ -316,7 +329,7 @@ void rgBloomFilterAddU64(BloomFilter* _bf, uint64_t _key)
     }
     uint64_t h1, h2;
     rgm_hash_u64_128(_key, &h1, &h2);
-    rgm_bloom_add_h(_bf, h1, h2);
+    rgm_bloom_add_h(_bf, h1, h2, 1);
 }
 
 void rgBloomFilterAdd(BloomFilter* _bf, const void* _key, uint64_t _keyLen)
@@ -327,7 +340,39 @@ void rgBloomFilterAdd(BloomFilter* _bf, const void* _key, uint64_t _keyLen)
     }
     uint64_t h1, h2;
     rgm_hash_wyhash_128(_key, _keyLen, &h1, &h2);
-    rgm_bloom_add_h(_bf, h1, h2);
+    rgm_bloom_add_h(_bf, h1, h2, 1);
+}
+
+/* Unsynchronised Add variants: plain (non-atomic) word ORs. See the header. */
+void rgBloomFilterAddHUnsync(BloomFilter* _bf, uint64_t _h1, uint64_t _h2)
+{
+    if (!rgm_bloom_is_live(_bf))
+    {
+        return;
+    }
+    rgm_bloom_add_h(_bf, _h1, _h2, 0);
+}
+
+void rgBloomFilterAddU64Unsync(BloomFilter* _bf, uint64_t _key)
+{
+    if (!rgm_bloom_is_live(_bf))
+    {
+        return;
+    }
+    uint64_t h1, h2;
+    rgm_hash_u64_128(_key, &h1, &h2);
+    rgm_bloom_add_h(_bf, h1, h2, 0);
+}
+
+void rgBloomFilterAddUnsync(BloomFilter* _bf, const void* _key, uint64_t _keyLen)
+{
+    if (!rgm_bloom_is_live(_bf) || (_key == 0 && _keyLen != 0))
+    {
+        return;
+    }
+    uint64_t h1, h2;
+    rgm_hash_wyhash_128(_key, _keyLen, &h1, &h2);
+    rgm_bloom_add_h(_bf, h1, h2, 0);
 }
 
 int rgBloomFilterTestH(BloomFilter* _bf, uint64_t _h1, uint64_t _h2)

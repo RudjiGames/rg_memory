@@ -621,6 +621,44 @@ void rgMemoryTest_denseListUsableAfterArenaClear(void)
     rgArenaDestroy(&a);
 }
 
+void rgMemoryTest_denseListFastPathsMatchExported(void)
+{
+    Arena a;
+    rgArenaCreate(&a, 1024 * 1024);
+    DenseList d1, d2;
+    TEST_ASSERT_EQUAL_INT(0, rgDenseListCreate(&a, &d1, 48, 32));
+    TEST_ASSERT_EQUAL_INT(0, rgDenseListCreate(&a, &d2, 48, 32));
+    uint32_t i;
+    for (i = 0; i < 33; ++i)
+    {
+        void* p1 = rgDenseListAlloc(&d1);
+        void* p2 = rgDenseListAllocFast(&d2);
+        TEST_ASSERT_EQUAL_INT(p1 != 0, p2 != 0);  /* the 33rd fails in both */
+        if (p1)
+        {
+            TEST_ASSERT_EQUAL_UINT64((uint8_t*)p1 - d1.m_buffer, (uint8_t*)p2 - d2.m_buffer);
+            memset(p2, (int)i, 48);
+        }
+    }
+    for (i = 0; i < 34; ++i)
+    {
+        void* q1 = rgDenseListAt(&d1, i);
+        void* q2 = rgDenseListAtFast(&d2, i);
+        TEST_ASSERT_EQUAL_INT(q1 != 0, q2 != 0);
+    }
+    /* Free-by-swap copies 16 bytes per step now: check the moved contents. */
+    rgDenseListFree(&d2, rgDenseListAtFast(&d2, 5));
+    uint8_t* moved = (uint8_t*)rgDenseListAtFast(&d2, 5);
+    for (i = 0; i < 48; ++i) TEST_ASSERT_EQUAL_UINT8(31u, moved[i]);
+
+    DenseList z;
+    memset(&z, 0, sizeof(z));
+    TEST_ASSERT_NULL(rgDenseListAllocFast(&z));
+    TEST_ASSERT_NULL(rgDenseListAtFast(&z, 0));
+    TEST_ASSERT_NULL(rgDenseListAllocFast(NULL));
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Entry point invoked from rg_memory_test.c
  * ------------------------------------------------------------------------- */
@@ -678,4 +716,5 @@ void rgMemoryTest_DenseList(void)
     RUN_TEST(rgMemoryTest_denseListBackwardFreeDuringIteration);
     RUN_TEST(rgMemoryTest_denseListLargePool);
     RUN_TEST(rgMemoryTest_denseListUsableAfterArenaClear);
+    RUN_TEST(rgMemoryTest_denseListFastPathsMatchExported);
 }
