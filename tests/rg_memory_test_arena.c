@@ -256,6 +256,35 @@ void rgMemoryTest_arenaAllocAlignedPromotedToEight(void)
     rgArenaDestroy(&a);
 }
 
+void rgMemoryTest_arenaAllocAlignedRejectsNonPow2(void)
+{
+    /* 3/5/6/7 used to be clamped to 8 and "succeed" with a pointer that does
+     * not honour the requested alignment. */
+    Arena a;
+    rgArenaCreate(&a, 64 * 1024);
+    TEST_ASSERT_NULL(rgArenaAllocAligned(&a, 64, 3));
+    TEST_ASSERT_NULL(rgArenaAllocAligned(&a, 64, 6));
+    TEST_ASSERT_NULL(rgArenaAllocAligned(&a, 64, 7));
+    TEST_ASSERT_NULL(rgArenaAllocAligned(&a, 64, 24));
+    TEST_ASSERT_EQUAL_UINT64(0, rgArenaUsed(&a));
+    rgArenaDestroy(&a);
+}
+
+void rgMemoryTest_arenaAllocAlignedZeroOnSlowPath(void)
+{
+    /* Alignment 0 ("default") must work on the commit (slow) path too, not
+     * only on the fast path; it used to reach the slow path unclamped. */
+    Arena a;
+    rgArenaCreate(&a, 8 * 1024 * 1024);
+    void* p = rgArenaAllocAligned(&a, 1024 * 1024, 0); /* > first commit chunk */
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_TRUE(is_aligned(p, 8));
+    void* q = rgArenaAllocAligned(&a, 3 * 1024 * 1024, 4);
+    TEST_ASSERT_NOT_NULL(q);
+    TEST_ASSERT_TRUE(is_aligned(q, 8));
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Commit / Reserve boundary
  * ------------------------------------------------------------------------- */
@@ -650,4 +679,6 @@ void rgMemoryTest_Arena(void)
     RUN_TEST(rgMemoryTest_arenaShrinkNoOpOnUninitialised);
     RUN_TEST(rgMemoryTest_arenaShrinkPreservesLiveAllocations);
     RUN_TEST(rgMemoryTest_arenaShrinkAllowsReuse);
+    RUN_TEST(rgMemoryTest_arenaAllocAlignedRejectsNonPow2);
+    RUN_TEST(rgMemoryTest_arenaAllocAlignedZeroOnSlowPath);
 }

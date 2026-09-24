@@ -162,8 +162,9 @@ void rgMemoryTest_freeListBufferSizeRoundsUp(void)
 {
     /* Block 24 rounds up to 32; 8 * 32 = 256. */
     TEST_ASSERT_EQUAL_UINT64((uint64_t)(8 * 32), (uint64_t)rgFreeListBufferSize(24, 8));
-    /* Block 1 is clamped to sizeof(uint32_t)=4, then rounded to 16. */
+    /* Block 1 is clamped to sizeof(void*), then rounded to 16. */
     TEST_ASSERT_EQUAL_UINT64((uint64_t)(8 * 16), (uint64_t)rgFreeListBufferSize(1, 8));
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(4 * 16), (uint64_t)rgFreeListBufferSize(0, 4)); /* 0 is clamped, not rejected */
 }
 
 void rgMemoryTest_freeListBufferSizeZeroInputs(void)

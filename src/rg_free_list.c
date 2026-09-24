@@ -17,7 +17,7 @@
  *     puts it and outlives nothing in particular.
  *   - The free chain is stored inside the free blocks themselves: each
  *     free block holds a POINTER to the next free block (or 0 as the
- *     end-of-chain sentinel). Block size is clamped up to sizeof(uint32_t)
+ *     end-of-chain sentinel). Block size is clamped up to sizeof(void*)
  *     and rounded up to 16 so block N starts on a 16-byte boundary
  *     (matching the arena's default alignment); the 16-byte floor also
  *     guarantees room for the in-band pointer link on every target
@@ -49,9 +49,9 @@ static int rgm_freelist_is_live(const FreeList* _fl)
  * Returns 0 on overflow / bad input. */
 static uint64_t rgm_freelist_effective_block_size(uint64_t _blockSize)
 {
-    if (_blockSize < sizeof(uint32_t))
+    if (_blockSize < sizeof(void*))
     {
-        _blockSize = sizeof(uint32_t);
+        _blockSize = sizeof(void*); /* room for the in-band next-block pointer */
     }
     _blockSize = (_blockSize + 15u) & ~(uint64_t)15u;
     if (_blockSize == 0 || _blockSize > 0xFFFFFFFFu)
@@ -101,7 +101,7 @@ static void rgm_freelist_install_lazy(FreeList* _fl, uint8_t* _buffer,
 
 /* ------------------------------------------------------------------------- */
 
-/* Return the post-round-up buffer requirement, or 0 on overflow / zero input. */
+/* Return the post-round-up buffer requirement, or 0 on overflow / zero _maxBlocks. */
 uint64_t rgFreeListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks)
 {
     if (_maxBlocks == 0)

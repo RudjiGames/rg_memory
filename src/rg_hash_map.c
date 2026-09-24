@@ -208,7 +208,7 @@ int32_t rgHashMapInit(HashMap* _map, Arena* _arena)
  * ------------------------------------------------------------------------- */
 
 #define RGM_HASHMAP_MAGIC           0x52474d484d415031ull /* "RGMHMAP1" */
-#define RGM_HASHMAP_PERSIST_VERSION 1u
+#define RGM_HASHMAP_PERSIST_VERSION 2u /* 2: protected-mix hash (digests changed). */
 
 /* Parked at arena offset 0 (inside Init's sentinel line, so it never aliases
  * a real node). 32 bytes -- comfortably within the 64-byte sentinel. */
@@ -301,6 +301,72 @@ int32_t rgHashMapSave(HashMap* _map)
     return RGM_ERROR_OK;
 }
 
+/* Maximum trie depth rgHashMapOpen accepts. Natural depth is ~log4(N) plus a
+ * few levels; anything near this cap needs repeated full-digest collisions
+ * across independent reseeds, so a deeper graph is treated as corrupt. */
+#define RGM_HASH_MAP_VALIDATE_MAX_DEPTH 256u
+
+/* Check that the node graph under one index root is safe to walk: every node
+ * lies (with its inline key) inside [RGM_CACHE_LINE, _highWater), is 8-byte
+ * aligned, and sits at a strictly higher offset than its parent. Nodes are
+ * bump-allocated after their parent, so a genuine map always satisfies the
+ * ordering, and it rules out cycles. *_budget caps the total node visits at
+ * the number of nodes that could fit below _highWater, so a hostile graph
+ * that shares children (a DAG) cannot force exponential work: it runs out
+ * of budget and is rejected. Returns 1 when valid, 0 otherwise. */
+static int rgm_hash_map_validate_subtree(const uint8_t* _base, uint64_t _highWater,
+                                         uint32_t _root, uint64_t* _budget)
+{
+    struct { uint32_t off; uint32_t next; } stack[RGM_HASH_MAP_VALIDATE_MAX_DEPTH];
+    uint32_t sp = 0;
+    uint32_t off = _root;
+    uint32_t parent = 0;
+
+    for (;;)
+    {
+        /* Validate `off` and push it. */
+        if (off < RGM_CACHE_LINE
+         || off <= parent
+         || (off & 7u) != 0
+         || (uint64_t)off + sizeof(HashMapNode) > _highWater
+         || *_budget == 0
+         || sp == RGM_HASH_MAP_VALIDATE_MAX_DEPTH)
+        {
+            return 0;
+        }
+        const HashMapNode* n = (const HashMapNode*)(_base + off);
+        if ((uint64_t)n->m_keyLen > _highWater - off - sizeof(HashMapNode))
+        {
+            return 0;
+        }
+        --*_budget;
+        stack[sp].off  = off;
+        stack[sp].next = 0;
+        ++sp;
+
+        /* Find the next child to descend into, popping finished frames. */
+        off = 0;
+        while (sp > 0)
+        {
+            const HashMapNode* top = (const HashMapNode*)(_base + stack[sp - 1].off);
+            while (stack[sp - 1].next < 4 && off == 0)
+            {
+                off = top->m_child[stack[sp - 1].next++];
+            }
+            if (off != 0)
+            {
+                parent = stack[sp - 1].off;
+                break;
+            }
+            --sp;
+        }
+        if (sp == 0)
+        {
+            return 1;
+        }
+    }
+}
+
 int32_t rgHashMapOpen(HashMap* _map, Arena* _arena)
 {
     if (_map == 0 || _arena == 0 || _arena->m_base == 0)
@@ -334,10 +400,32 @@ int32_t rgHashMapOpen(HashMap* _map, Arena* _arena)
      || hdr->m_indexOffset > UINT32_MAX
      || hdr->m_indexOffset > cap
      || RGM_HASH_MAP_INDEX_BYTES > cap - hdr->m_indexOffset
+     || (hdr->m_indexOffset & 3u) != 0
      || hdr->m_highWater > cap
+     || hdr->m_highWater > _arena->m_committed
      || hdr->m_highWater < hdr->m_indexOffset + RGM_HASH_MAP_INDEX_BYTES)
     {
         return RGM_ERROR_ERR_FORMAT;
+    }
+
+    /* The node graph is as untrusted as the header: every offset reachable
+     * from the index must be validated before Get/Put/ForEach dereference it,
+     * or a corrupt file turns into out-of-bounds reads and writes. Validate
+     * from the file's copy of the index first, so a rejected file leaves
+     * *_map untouched. */
+    {
+        const uint32_t* index  = (const uint32_t*)(base + hdr->m_indexOffset);
+        uint64_t        nroots = RGM_HASH_MAP_INDEX_BYTES / sizeof(uint32_t);
+        uint64_t        budget = hdr->m_highWater / sizeof(HashMapNode);
+        uint64_t        r;
+        for (r = 0; r < nroots; ++r)
+        {
+            if (index[r] != 0
+             && !rgm_hash_map_validate_subtree(base, hdr->m_highWater, index[r], &budget))
+            {
+                return RGM_ERROR_ERR_FORMAT;
+            }
+        }
     }
 
     _map->m_arena = _arena;
@@ -579,11 +667,15 @@ int32_t rgHashMapGetBatchU64(HashMap* restrict _map,
     uint8_t         active[RGM_HASH_BATCH_K];
     uint32_t        round [RGM_HASH_BATCH_K];
 
+    /* Advance by the batch actually processed (n), not by RGM_HASH_BATCH_K: a fixed
+     * stride would wrap batchBase past UINT32_MAX when _count is within RGM_HASH_BATCH_K of it,
+     * restarting the loop forever. batchBase + n never exceeds _count. */
     uint32_t batchBase;
-    for (batchBase = 0; batchBase < _count; batchBase += RGM_HASH_BATCH_K)
+    uint32_t n;
+    for (batchBase = 0; batchBase < _count; batchBase += n)
     {
-        uint32_t n = (_count - batchBase) < RGM_HASH_BATCH_K
-                   ? (_count - batchBase) : RGM_HASH_BATCH_K;
+        n = (_count - batchBase) < RGM_HASH_BATCH_K
+          ? (_count - batchBase) : RGM_HASH_BATCH_K;
 
         uint32_t i;
         for (i = 0; i < n; ++i)

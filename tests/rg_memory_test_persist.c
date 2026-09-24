@@ -291,6 +291,144 @@ void rgMemoryTest_hashMapOpenRejectsCorruptIndexOffset(void)
     remove(RGM_PERSIST_PATH2);
 }
 
+/* Corruption kinds applied to the first populated node by the test below. */
+enum
+{
+    RGM_CORRUPT_ROOT_OUT_OF_BOUNDS,  /* index entry points far past the file   */
+    RGM_CORRUPT_ROOT_IN_HEADER,      /* index entry points into the header    */
+    RGM_CORRUPT_KEYLEN_HUGE,         /* node's inline key runs past the file  */
+    RGM_CORRUPT_CHILD_CYCLE,         /* node's child points back at itself    */
+    RGM_CORRUPT_COUNT
+};
+
+/* Build a small persisted map, apply one corruption to the node graph (not
+ * the header, which is already validated above), and check Open rejects it
+ * instead of letting Get / Put / ForEach walk out of bounds. */
+void rgMemoryTest_hashMapOpenRejectsCorruptNodeGraph(void)
+{
+    int kind;
+    for (kind = 0; kind < RGM_CORRUPT_COUNT; ++kind)
+    {
+        remove(RGM_PERSIST_PATH2);
+        {
+            Arena a;
+            TEST_ASSERT_EQUAL_INT(0, rgArenaCreateShared(&a, RGM_PERSIST_PATH2, 1024 * 1024));
+            HashMap m;
+            TEST_ASSERT_EQUAL_INT(0, rgHashMapInit(&m, &a));
+            uint64_t* v = rgHashMapPutU64(&m, 1234u);
+            TEST_ASSERT_NOT_NULL(v);
+            *v = 5678u;
+            TEST_ASSERT_EQUAL_INT(0, rgHashMapSave(&m));
+            rgArenaDestroy(&a);
+        }
+
+        /* Sanity: the untouched file opens. */
+        {
+            Arena a;
+            TEST_ASSERT_EQUAL_INT(0, rgArenaOpenShared(&a, RGM_PERSIST_PATH2, 1));
+            HashMap m;
+            TEST_ASSERT_EQUAL_INT(0, rgHashMapOpen(&m, &a));
+            rgArenaDestroy(&a);
+        }
+
+        {
+            Arena a;
+            TEST_ASSERT_EQUAL_INT(0, rgArenaOpenShared(&a, RGM_PERSIST_PATH2, 0));
+            uint8_t*  base = a.m_base;
+            uint64_t  indexOffset;
+            memcpy(&indexOffset, base + 24, sizeof(indexOffset));
+            uint32_t* index  = (uint32_t*)(base + indexOffset);
+#if RG_HASH_USE_TOP_INDEX
+            uint32_t  nroots = RG_HASH_TOP_SIZE;
+#else
+            uint32_t  nroots = 1;
+#endif
+            uint32_t  r      = 0;
+            while (r < nroots && index[r] == 0) ++r;
+            TEST_ASSERT_TRUE(r < nroots);
+            uint32_t  node   = index[r];
+
+            switch (kind)
+            {
+                case RGM_CORRUPT_ROOT_OUT_OF_BOUNDS: index[r] = 0xFFFFFF00u; break;
+                case RGM_CORRUPT_ROOT_IN_HEADER:     index[r] = 8u;          break;
+                case RGM_CORRUPT_KEYLEN_HUGE:
+                {
+                    uint32_t len = 0xFFFFFFF0u; /* m_keyLen: after 4 child offsets + hash + value */
+                    memcpy(base + node + 32, &len, sizeof(len));
+                    break;
+                }
+                case RGM_CORRUPT_CHILD_CYCLE:
+                    memcpy(base + node, &node, sizeof(node)); /* m_child[0] = self */
+                    break;
+            }
+            rgArenaFlush(&a);
+            rgArenaDestroy(&a);
+        }
+
+        {
+            Arena a;
+            TEST_ASSERT_EQUAL_INT(0, rgArenaOpenShared(&a, RGM_PERSIST_PATH2, 1));
+            HashMap m;
+            TEST_ASSERT_EQUAL_INT_MESSAGE(RGM_ERROR_ERR_FORMAT, rgHashMapOpen(&m, &a),
+                                          "corrupt node graph accepted");
+            rgArenaDestroy(&a);
+        }
+    }
+    remove(RGM_PERSIST_PATH2);
+}
+
+/* rgArenaCreateSharedTemp must create its file exclusively: an existing file
+ * (or a symlink planted at the path) makes it fail rather than truncate. */
+void rgMemoryTest_sharedTempRefusesExistingPath(void)
+{
+    remove(RGM_PERSIST_PATH);
+    {
+        FILE* f = fopen(RGM_PERSIST_PATH, "wb");
+        TEST_ASSERT_NOT_NULL(f);
+        TEST_ASSERT_EQUAL_size_t(5, fwrite("hello", 1, 5, f));
+        fclose(f);
+    }
+
+    Arena a;
+    memset(&a, 0, sizeof(a));
+    TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_IO, rgArenaCreateSharedTemp(&a, RGM_PERSIST_PATH, 64 * 1024));
+    TEST_ASSERT_FALSE(rgArenaIsValid(&a));
+
+    /* The existing file is untouched. */
+    {
+        char  buf[8] = { 0 };
+        FILE* f = fopen(RGM_PERSIST_PATH, "rb");
+        TEST_ASSERT_NOT_NULL(f);
+        TEST_ASSERT_EQUAL_size_t(5, fread(buf, 1, sizeof(buf), f));
+        fclose(f);
+        TEST_ASSERT_EQUAL_MEMORY("hello", buf, 5);
+    }
+    remove(RGM_PERSIST_PATH);
+
+    /* A fresh path works and leaves nothing behind. */
+    TEST_ASSERT_EQUAL_INT(0, rgArenaCreateSharedTemp(&a, RGM_PERSIST_PATH, 64 * 1024));
+    TEST_ASSERT_NOT_NULL(rgArenaAlloc(&a, 128));
+    rgArenaFlush(&a);
+    rgArenaDestroy(&a);
+    {
+        FILE* f = fopen(RGM_PERSIST_PATH, "rb");
+        TEST_ASSERT_NULL(f);
+        if (f) fclose(f);
+    }
+}
+
+void rgMemoryTest_pathSupportsSparse(void)
+{
+    TEST_ASSERT_EQUAL_INT(-1, rgVmPathSupportsSparse(NULL));
+    TEST_ASSERT_EQUAL_INT(-1, rgVmPathSupportsSparse(""));
+#if defined(__linux__) || defined(_WIN32)
+    /* Must resolve a not-yet-existing file through its existing directory. */
+    int32_t r = rgVmPathSupportsSparse("./rg_memory_no_such_file.bin");
+    TEST_ASSERT_TRUE(r == 0 || r == 1);
+#endif
+}
+
 void rgMemoryTest_hashMapSaveNullSafe(void)
 {
     TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_INVALID, rgHashMapSave(NULL));
@@ -309,4 +447,7 @@ void rgMemoryTest_Persist(void)
     RUN_TEST(rgMemoryTest_hashMapArenaReuseAfterClear);
     RUN_TEST(rgMemoryTest_hashMapOpenRejectsCorruptIndexOffset);
     RUN_TEST(rgMemoryTest_hashMapSaveNullSafe);
+    RUN_TEST(rgMemoryTest_hashMapOpenRejectsCorruptNodeGraph);
+    RUN_TEST(rgMemoryTest_sharedTempRefusesExistingPath);
+    RUN_TEST(rgMemoryTest_pathSupportsSparse);
 }

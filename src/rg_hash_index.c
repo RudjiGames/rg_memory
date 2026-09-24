@@ -188,7 +188,7 @@ int32_t rgHashIndexGetH(HashIndex* restrict _idx,
         uint64_t cur = (uint64_t)rgm_atomic_load_i64(slot);
         if (cur == 0)
         {
-            return RGM_ERROR_ERR_INVALID; /* not found */
+            return RGM_ERROR_ERR_NOT_FOUND;
         }
 
         HashIndexNode* n = (HashIndexNode*)(uintptr_t)cur;
@@ -286,11 +286,15 @@ int32_t rgHashIndexGetBatchH(HashIndex* restrict _idx,
     uint8_t               active[RGM_HASH_INDEX_BATCH_K];
     uint32_t              round [RGM_HASH_INDEX_BATCH_K];
 
+    /* Advance by the batch actually processed (n), not by RGM_HASH_INDEX_BATCH_K: a fixed
+     * stride would wrap base past UINT32_MAX when _count is within RGM_HASH_INDEX_BATCH_K of it,
+     * restarting the loop forever. base + n never exceeds _count. */
     uint32_t base;
-    for (base = 0; base < _count; base += RGM_HASH_INDEX_BATCH_K)
+    uint32_t n;
+    for (base = 0; base < _count; base += n)
     {
-        uint32_t n = (_count - base) < RGM_HASH_INDEX_BATCH_K
-                   ? (_count - base) : RGM_HASH_INDEX_BATCH_K;
+        n = (_count - base) < RGM_HASH_INDEX_BATCH_K
+          ? (_count - base) : RGM_HASH_INDEX_BATCH_K;
 
         uint32_t i;
         for (i = 0; i < n; ++i)
