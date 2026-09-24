@@ -143,13 +143,23 @@ static RGM_FORCEINLINE uint64_t rgm_hash_wymum(uint64_t _a, uint64_t _b)
     return lo ^ hi;
 }
 
+/* Protected mix (cf. rapidhash's RAPIDHASH_PROTECTED): the multiplicands are
+ * folded back into the result, so a multiplicand that happens to be zero cannot
+ * erase the other operand. With the plain upstream form, wymum(_a ^ _s1, ...),
+ * every input with _a == _s1 mapped to 0 regardless of _b and of the seed -- a
+ * seed-independent class of ~2^64 keys sharing one digest, which defeated both
+ * HashIndex's two-seed (h1, h2) identity and the trie descent reseed. Here a zero
+ * multiplicand leaves `x ^ y`, which still carries _b and the seed. The seed is
+ * folded into both multiplicands so the zero points themselves are seed-dependent. */
 static RGM_FORCEINLINE uint64_t rgm_hash_wymix(uint64_t _a, uint64_t _b, uint64_t _s1, uint64_t _s2)
 {
-    return rgm_hash_wymum(_a ^ _s1, _b ^ _s2);
+    uint64_t x = _a ^ _s1 ^ _s2;
+    uint64_t y = _b ^ _s2;
+    return x ^ y ^ rgm_hash_wymum(x, y);
 }
 
-/* 128-bit analogue of rgm_hash_wymix. *_h1 is the canonical wyhash output
- * (lo ^ hi); *_h2 is the upper half of the same multiply. The pair is
+/* 128-bit analogue of rgm_hash_wymix. *_h1 equals rgm_hash_wymix's output;
+ * *_h2 is the upper half of the same multiply (protected the same way). The pair is
  * statistically near-independent for non-adversarial input -- the
  * bijection (h1, h2) = (lo XOR hi, hi) over uniform (lo, hi) is itself
  * uniform over the 128-bit space. Used wherever the consumer needs two
@@ -158,10 +168,12 @@ static RGM_FORCEINLINE void rgm_hash_wymix128(uint64_t _a, uint64_t _b,
                                               uint64_t _s1, uint64_t _s2,
                                               uint64_t* _h1, uint64_t* _h2)
 {
+    uint64_t x = _a ^ _s1 ^ _s2;
+    uint64_t y = _b ^ _s2;
     uint64_t lo, hi;
-    rgm_hash_wymum128(_a ^ _s1, _b ^ _s2, &lo, &hi);
-    *_h1 = lo ^ hi;
-    *_h2 = hi;
+    rgm_hash_wymum128(x, y, &lo, &hi);
+    *_h1 = x ^ y ^ lo ^ hi;
+    *_h2 = y ^ hi;
 }
 
 /* wyhash secret constants (v4 final). */
@@ -170,18 +182,23 @@ static RGM_FORCEINLINE void rgm_hash_wymix128(uint64_t _a, uint64_t _b,
 #define RGM_HASH_WYP2 0x4b33a62ed433d4a3ull
 #define RGM_HASH_WYP3 0x4d5a2da51de1aa47ull
 
-/* wyhash 64-bit (seeded). The seed parameter becomes the initial state
- * of the mixing recurrence, so two calls with different seeds produce
+/* wyhash-derived 64-bit hash (seeded). The seed parameter becomes the initial
+ * state of the mixing recurrence, so two calls with different seeds produce
  * statistically independent digests for the same input -- this is what
  * HashIndex relies on when deriving its two collision-safety hashes
  * from one byte key.
+ *
+ * NOTE: this is NOT bit-compatible with upstream wyhash. It keeps wyhash's
+ * block structure and constants but uses the protected mix above (upstream's
+ * mix has seed-independent zero classes) and omits upstream's seed pre-mix and
+ * two-step finalizer. Digests will not match upstream test vectors.
  *
  * Fast path at the top covers the 8-byte key case (uint64 keys, by far
  * the most common in the tries). The branch is a single compare and
  * predicts perfectly for any workload with a dominant key size. The
  * fast path produces the *same hash output* as the general path on
  * little-endian targets (every platform this library supports), so
- * mixed-size inputs are still wyhash-compliant.
+ * 8-byte keys hash identically through either path.
  *
  * Marked `inline` (compiler's choice, not forced). MSVC measurably
  * regressed when this was RGM_FORCEINLINE: the full wyhash body
@@ -261,7 +278,7 @@ static inline uint64_t rgm_hash_wyhash_seeded(const void* _data, uint64_t _len, 
 
 /* Default-seeded wyhash. Drop-in replacement for FNV-1a but faster on
  * every length and with much better avalanche. The initial state is
- * RGM_HASH_WYP0, matching the upstream wyhash v4 final convention. */
+ * RGM_HASH_WYP0. */
 static inline uint64_t rgm_hash_wyhash(const void* _data, uint64_t _len)
 {
     return rgm_hash_wyhash_seeded(_data, _len, RGM_HASH_WYP0);
@@ -402,10 +419,11 @@ static RGM_FORCEINLINE uint64_t rgm_hash_u64(uint64_t _key)
  *      reseeding only ever changes which child a step takes, never which
  *      node counts as a match.
  *
- *   2. The reseed of two distinct keys differs even when their original
- *      digests collided (distinct key bytes -> distinct wyhash), so the
- *      reseed genuinely breaks the collision rather than merely re-balancing
- *      it. The round counter advances on each reseed so a chain long enough
+ *   2. The reseed uses a different seed, and the protected mix makes every
+ *      digest seed-dependent (no input class maps to one digest under every
+ *      seed), so two keys whose original digests collided are, barring a
+ *      second independent collision, separated by the reseed rather than
+ *      merely re-balanced. The round counter advances on each reseed so a chain long enough
  *      to exhaust a reseeded digest keeps drawing fresh entropy.
  *
  * Cost on the hot path is a single `if (h == 0)` per level. For any
@@ -449,7 +467,7 @@ static RGM_FORCEINLINE uint64_t rgm_hash_reseed_h(uint64_t _h1, uint64_t _h2, ui
 /* ---------- 128-bit variants (two hashes for the price of one) -----------
  *
  * Same wyhash mixing chain, but the *final* wymum's two halves are exposed
- * instead of XORed together. *_h1 matches the canonical wyhash output
+ * instead of XORed together. *_h1 matches the 64-bit hash output
  * exactly (so a 64-bit consumer is unaffected by this layering); *_h2 is
  * the upper half of that same multiply -- statistically independent
  * enough of *_h1 for double-hashing schemes (Bloom filter, cuckoo, etc.).

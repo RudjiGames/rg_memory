@@ -72,7 +72,7 @@ static void rgm_denselist_install(DenseList* _dl, uint8_t* _buffer,
 
 /* ------------------------------------------------------------------------- */
 
-/* Return the post-round-up buffer requirement, or 0 on overflow / zero input. */
+/* Return the post-round-up buffer requirement, or 0 on overflow / zero _maxBlocks. */
 uint64_t rgDenseListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks)
 {
     if (_maxBlocks == 0)

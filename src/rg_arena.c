@@ -25,6 +25,17 @@
  *     must serialize their own access.
  */
 
+/* Expose madvise / MADV_* / MAP_ANONYMOUS / ftruncate under strict ISO C
+ * (-std=c99 / -std=c11), where glibc hides them. Feature-test macros only
+ * take effect before the first system header of the translation unit, so
+ * they must precede every #include below. Harmless on Windows and macOS. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#   define _DEFAULT_SOURCE 1
+#endif
+#if !defined(_WIN32) && defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#   define _DARWIN_C_SOURCE 1
+#endif
+
 #include "../include/rg_memory/rg_memory.h"
 #include "rg_memory_platform.h"
 
@@ -86,6 +97,7 @@ typedef struct rgm_vm_result
     void*    base;
     uint64_t reserved;
     uint64_t committed;
+    uint64_t file;      /* Windows writable file mappings: kept file HANDLE; 0 otherwise. */
 } rgm_vm_result;
 
 /* Reserve _bytes of virtual address space without committing any pages.
@@ -102,12 +114,56 @@ typedef struct rgm_vm_result
  *
  * The returned struct has .base == 0 on hard failure (no normal-pages
  * fallback succeeded either). */
+#if RGM_PLATFORM_WINDOWS
+/* MEM_LARGE_PAGES needs SeLockMemoryPrivilege ENABLED in the process token;
+ * merely being granted "Lock pages in memory" leaves it disabled. Enable it
+ * once, best-effort. advapi32 is resolved at runtime so the library adds no
+ * link dependency. Racy first calls from several threads are harmless: the
+ * adjustment is idempotent. */
+typedef BOOL (WINAPI* rgm_OpenProcessToken_fn)(HANDLE, DWORD, PHANDLE);
+typedef BOOL (WINAPI* rgm_LookupPrivilegeValueA_fn)(LPCSTR, LPCSTR, PLUID);
+typedef BOOL (WINAPI* rgm_AdjustTokenPrivileges_fn)(HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD,
+                                                    PTOKEN_PRIVILEGES, PDWORD);
+
+static void rgm_enable_lock_memory_privilege(void)
+{
+    static volatile LONG s_done = 0;
+    if (s_done)
+    {
+        return;
+    }
+    HMODULE adv = LoadLibraryA("advapi32.dll");
+    if (adv != 0)
+    {
+        rgm_OpenProcessToken_fn      openTok = (rgm_OpenProcessToken_fn)(void*)GetProcAddress(adv, "OpenProcessToken");
+        rgm_LookupPrivilegeValueA_fn lookup  = (rgm_LookupPrivilegeValueA_fn)(void*)GetProcAddress(adv, "LookupPrivilegeValueA");
+        rgm_AdjustTokenPrivileges_fn adjust  = (rgm_AdjustTokenPrivileges_fn)(void*)GetProcAddress(adv, "AdjustTokenPrivileges");
+        HANDLE tok = 0;
+        if (openTok && lookup && adjust
+         && openTok(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok))
+        {
+            TOKEN_PRIVILEGES tp;
+            tp.PrivilegeCount           = 1;
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            if (lookup(0, "SeLockMemoryPrivilege", &tp.Privileges[0].Luid))
+            {
+                (void)adjust(tok, FALSE, &tp, 0, 0, 0);
+            }
+            CloseHandle(tok);
+        }
+        /* advapi32 stays loaded for the process lifetime anyway. */
+    }
+    s_done = 1;
+}
+#endif
+
 static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
 {
     rgm_vm_result r;
     r.base      = 0;
     r.reserved  = 0;
     r.committed = 0;
+    r.file      = 0;
 
 #if SIZE_MAX < UINT64_MAX
     /* 32-bit target: the OS calls below take size_t/SIZE_T, so a >4GB request would silently truncate at the
@@ -126,6 +182,7 @@ static rgm_vm_result rgm_vm_reserve(uint64_t _bytes, uint32_t _flags)
      * no contiguous large-page-aligned block, etc.). */
     if (_flags & RGM_ARENA_FLAG_HUGE_PAGES)
     {
+        rgm_enable_lock_memory_privilege();
         SIZE_T lp = GetLargePageMinimum();
         if (lp != 0)
         {
@@ -198,13 +255,17 @@ static int rgm_vm_commit(void* _base, uint64_t _bytes)
 /* Release the reservation/mapping at _base. Anonymous arenas hand the VM
  * range back to the OS; file-backed arenas unmap the view (the underlying
  * file persists). */
-static void rgm_vm_release(void* _base, uint64_t _bytes, uint32_t _backing)
+static void rgm_vm_release(void* _base, uint64_t _bytes, uint32_t _backing, uint64_t _file)
 {
 #if RGM_PLATFORM_WINDOWS
     (void)_bytes;
     if (_backing == RGM_ARENA_BACKING_FILE)
     {
         UnmapViewOfFile(_base);
+        if (_file != 0)
+        {
+            CloseHandle((HANDLE)(uintptr_t)_file);
+        }
     }
     else
     {
@@ -214,6 +275,7 @@ static void rgm_vm_release(void* _base, uint64_t _bytes, uint32_t _backing)
     /* munmap releases both anonymous and file-backed mappings; the file
      * itself is unaffected. */
     (void)_backing;
+    (void)_file;
     munmap(_base, (uint64_t)_bytes);
 #endif
 }
@@ -244,6 +306,7 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
     r.base      = 0;
     r.reserved  = 0;
     r.committed = 0;
+    r.file      = 0;
 
 #if RGM_PLATFORM_WINDOWS
     {
@@ -253,7 +316,10 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
          * capture). Harmless for files we own. The view is the size at map time; a concurrent append-only writer
          * never touches our mapped pages. */
         DWORD  share  = FILE_SHARE_READ | (DWORD)FILE_SHARE_WRITE;
-        DWORD  disp   = _openExisting ? OPEN_EXISTING : CREATE_ALWAYS;
+        /* Temp files are created exclusively (CREATE_NEW): never adopt or
+         * truncate a file someone else planted at _path. */
+        DWORD  disp   = _openExisting ? OPEN_EXISTING
+                      : (_deleteOnClose ? CREATE_NEW : CREATE_ALWAYS);
         DWORD  attr   = FILE_ATTRIBUTE_NORMAL;
         HANDLE f;
         if (_deleteOnClose && !_openExisting)
@@ -261,15 +327,10 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             attr  |= FILE_FLAG_DELETE_ON_CLOSE;
             share |= FILE_SHARE_DELETE;	/* allow the delete disposition while mapped */
         }
+        /* No fallback when DELETE_ON_CLOSE is rejected: a plain file would
+         * outlive the process and the Arena has no way to tell the caller to
+         * remove it, so fail instead (see rgArenaCreateSharedTemp). */
         f = CreateFileA(_path, access, share, 0, disp, attr, 0);
-        if (f == INVALID_HANDLE_VALUE && (attr & FILE_FLAG_DELETE_ON_CLOSE))
-        {
-            /* Filesystem rejected DELETE_ON_CLOSE -- fall back to a plain file
-             * (the caller's explicit unlink path then handles removal). */
-            attr  &= ~(DWORD)FILE_FLAG_DELETE_ON_CLOSE;
-            share &= ~(DWORD)FILE_SHARE_DELETE;
-            f = CreateFileA(_path, access, share, 0, disp, attr, 0);
-        }
         if (f == INVALID_HANDLE_VALUE)
         {
             return r;
@@ -335,9 +396,16 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
             {
                 DWORD viewAccess = _readOnly ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS;
                 void* base = MapViewOfFile(map, viewAccess, 0, 0, (SIZE_T)size);
-                /* Both handles can go now -- the view keeps the file mapped. */
+                /* The mapping handle can go now -- the view keeps the file mapped.
+                 * A writable view keeps the FILE handle: FlushViewOfFile only
+                 * starts the write-back, and FlushFileBuffers (rgArenaFlush)
+                 * needs the handle to make it durable. */
                 CloseHandle(map);
-                CloseHandle(f);
+                if (base == 0 || _readOnly)
+                {
+                    CloseHandle(f);
+                    f = INVALID_HANDLE_VALUE;
+                }
                 if (base == 0)
                 {
                     if (!_openExisting && !(attr & FILE_FLAG_DELETE_ON_CLOSE))
@@ -349,6 +417,7 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
                 r.base      = base;
                 r.reserved  = size;
                 r.committed = size;
+                r.file      = (f != INVALID_HANDLE_VALUE) ? (uint64_t)(uintptr_t)f : 0;
             }
         }
     }
@@ -356,7 +425,23 @@ static rgm_vm_result rgm_vm_map_file(const char* _path, uint64_t _bytes,
     {
         int flags = _readOnly ? O_RDONLY
                               : (O_RDWR | (_openExisting ? 0 : (O_CREAT | O_TRUNC)));
-        int fd = open(_path, flags, 0644);
+        int mode  = 0644;
+        if (_deleteOnClose && !_openExisting)
+        {
+            /* Temp files: create exclusively (O_EXCL also refuses to follow a
+             * symlink at _path) and owner-only, so a file or symlink planted
+             * at a shared-directory path can neither be truncated through nor
+             * read while the name briefly exists. */
+            flags = O_RDWR | O_CREAT | O_EXCL;
+#if defined(O_NOFOLLOW)
+            flags |= O_NOFOLLOW;
+#endif
+            mode  = 0600;
+        }
+#if defined(O_CLOEXEC)
+        flags |= O_CLOEXEC;
+#endif
+        int fd = open(_path, flags, mode);
         if (fd < 0)
         {
             return r;
@@ -501,20 +586,10 @@ static int rgm_arena_ensure_committed(Arena* _a, uint64_t _required_pos)
  * Returns 0 on out-of-memory or invalid args. */
 static void* rgm_arena_alloc_internal(Arena* _a, uint64_t _size, uint64_t _align)
 {
-    RGM_ASSERT(_align != 0 && (_align & (_align - 1)) == 0);
+    /* Callers pass a validated power of two (>= 8); see rgArenaAllocAligned. */
+    RGM_ASSERT(_align >= 8 && (_align & (_align - 1)) == 0);
 
     if (_size == 0)
-    {
-        return 0;
-    }
-    if (_align < 8)
-    {
-        _align = 8;
-    }
-    /* The assert above compiles out in release: reject non-pow2 explicitly there too - the padding mask
-     * math below is only valid for powers of two, and a garbage-padded (misaligned) pointer would corrupt
-     * SIMD/atomic users. (< 8 values were clamped first, so legacy 1/2/4 - and 0-as-default - still work.) */
-    if (_align & (_align - 1))
     {
         return 0;
     }
@@ -574,6 +649,7 @@ int32_t rgArenaCreateEx(Arena* _arena, uint64_t _arenaSize, uint32_t _flags)
     _arena->m_committed = r.committed; /* non-zero on the eager-commit huge-pages path. */
     _arena->m_pos       = 0;
     _arena->m_backing   = RGM_ARENA_BACKING_ANON;
+    _arena->m_file      = 0;
     return RGM_ERROR_OK;
 }
 
@@ -602,6 +678,7 @@ int32_t rgArenaCreateShared(Arena* _arena, const char* _path, uint64_t _arenaSiz
     _arena->m_committed = r.committed; /* whole file is backed; no later commit step. */
     _arena->m_pos       = 0;
     _arena->m_backing   = RGM_ARENA_BACKING_FILE;
+    _arena->m_file      = r.file;
     return RGM_ERROR_OK;
 }
 
@@ -627,6 +704,7 @@ int32_t rgArenaCreateSharedTemp(Arena* _arena, const char* _path, uint64_t _aren
     _arena->m_committed = r.committed;
     _arena->m_pos       = 0;
     _arena->m_backing   = RGM_ARENA_BACKING_FILE;
+    _arena->m_file      = r.file;
     return RGM_ERROR_OK;
 }
 
@@ -652,6 +730,7 @@ int32_t rgArenaOpenShared(Arena* _arena, const char* _path, int _readOnly)
     _arena->m_committed = r.committed;
     _arena->m_pos       = r.reserved; /* rgHashMapOpen resets to the stored high-water. */
     _arena->m_backing   = RGM_ARENA_BACKING_FILE;
+    _arena->m_file      = r.file;
     return RGM_ERROR_OK;
 }
 
@@ -664,7 +743,15 @@ void rgArenaFlush(Arena* _arena)
         return;
     }
 #if RGM_PLATFORM_WINDOWS
+    /* FlushViewOfFile only initiates the write-back of the view; the data is
+     * durable once FlushFileBuffers returns. Read-only views keep no handle
+     * and have nothing to flush. */
+    if (_arena->m_file == 0)
+    {
+        return;
+    }
     (void)FlushViewOfFile(_arena->m_base, (SIZE_T)_arena->m_committed);
+    (void)FlushFileBuffers((HANDLE)(uintptr_t)_arena->m_file);
 #else
     (void)msync(_arena->m_base, (uint64_t)_arena->m_committed, MS_SYNC);
 #endif
@@ -700,11 +787,85 @@ int32_t rgVmPathSupportsSparse(const char* _path)
         return -1;
     }
     return (flags & FILE_SUPPORTS_SPARSE_FILES) ? 1 : 0;
+#elif defined(__linux__) || defined(__APPLE__)
+    /* Most POSIX filesystems grow a truncated file sparsely, but FAT / exFAT
+     * (and HFS+ on macOS) allocate or zero-fill the whole length, so ask the
+     * filesystem rather than assuming. _path may not exist yet: strip trailing
+     * components until statfs succeeds on an existing ancestor. */
+    char           buf[4096];
+    struct statfs  sfs;
+    uint32_t       len = 0;
+
+    if (!_path || !_path[0])
+    {
+        return -1;
+    }
+    while (_path[len] != 0)
+    {
+        if (len + 1u >= (uint32_t)sizeof(buf))
+        {
+            return -1;
+        }
+        buf[len] = _path[len];
+        ++len;
+    }
+    buf[len] = 0;
+
+    for (;;)
+    {
+        if (statfs(buf, &sfs) == 0)
+        {
+            break;
+        }
+        /* Drop the last path component. */
+        while (len > 0 && buf[len - 1] == '/') --len;
+        while (len > 0 && buf[len - 1] != '/') --len;
+        while (len > 1 && buf[len - 1] == '/') --len;
+        if (len == 0)
+        {
+            buf[0] = '.';
+            buf[1] = 0;
+            if (statfs(buf, &sfs) != 0)
+            {
+                return -1;
+            }
+            break;
+        }
+        buf[len] = 0;
+    }
+
+#   if defined(__linux__)
+    switch ((uint64_t)(unsigned long)sfs.f_type)
+    {
+        case 0x4d44ull:     /* MSDOS_SUPER_MAGIC (FAT12/16/32, vfat) */
+        case 0x2011bab0ull: /* EXFAT_SUPER_MAGIC                     */
+        case 0x4244ull:     /* HFS_SUPER_MAGIC                       */
+        case 0x482bull:     /* HFSPLUS_SUPER_MAGIC                   */
+            return 0;
+        default:
+            return 1;
+    }
+#   else
+    {
+        /* macOS: APFS supports sparse files; HFS+, FAT and exFAT do not. */
+        static const char* const s_noSparse[] = { "hfs", "msdos", "exfat" };
+        uint32_t i;
+        for (i = 0; i < (uint32_t)(sizeof(s_noSparse) / sizeof(s_noSparse[0])); ++i)
+        {
+            const char* a = sfs.f_fstypename;
+            const char* b = s_noSparse[i];
+            while (*a != 0 && *a == *b) { ++a; ++b; }
+            if (*a == 0 && *b == 0)
+            {
+                return 0;
+            }
+        }
+        return 1;
+    }
+#   endif
 #else
-    /* POSIX regular files are sparse by default: a truncate-grown file
-     * allocates blocks only where written. */
     (void)_path;
-    return 1;
+    return -1;
 #endif
 }
 
@@ -716,12 +877,13 @@ void rgArenaDestroy(Arena* _arena)
     {
         return;
     }
-    rgm_vm_release(_arena->m_base, _arena->m_reserved, _arena->m_backing);
+    rgm_vm_release(_arena->m_base, _arena->m_reserved, _arena->m_backing, _arena->m_file);
     _arena->m_base      = 0;
     _arena->m_reserved  = 0;
     _arena->m_committed = 0;
     _arena->m_pos       = 0;
     _arena->m_backing   = RGM_ARENA_BACKING_ANON;
+    _arena->m_file      = 0;
 }
 
 /* Reset the bump pointer to 0; keeps committed pages hot for reuse. */
@@ -772,13 +934,19 @@ void* rgArenaAllocAligned(Arena* restrict _arena, uint64_t _size, uint64_t _alig
         return 0;
     }
 
+    /* 0 means "default"; any other value must be a power of two. Reject
+     * non-powers of two BEFORE clamping small values up to 8, or 3/5/6/7
+     * would silently succeed with an 8-aligned pointer that does not honour
+     * the request. The padding mask math is only valid for powers of two. */
     uint64_t align = (uint64_t)_alignment;
+    if (align & (align - 1))
+    {
+        return 0;
+    }
     if (align < 8)
     {
         align = 8;
     }
-    /* Non-pow2 alignment is a caller bug; let the cold path reject it. */
-    if ((align & (align - 1)) == 0)
     {
         uint64_t  size     = (uint64_t)_size;
         uintptr_t target   = (uintptr_t)_arena->m_base + (uintptr_t)_arena->m_pos;
@@ -793,7 +961,7 @@ void* rgArenaAllocAligned(Arena* restrict _arena, uint64_t _size, uint64_t _alig
         }
     }
 
-    return rgm_arena_alloc_internal(_arena, (uint64_t)_size, (uint64_t)_alignment);
+    return rgm_arena_alloc_internal(_arena, (uint64_t)_size, align);
 }
 
 /* Rewind the bump pointer by _size bytes (LIFO; the value is unchecked). */

@@ -67,8 +67,10 @@ extern "C" {
         uint64_t    m_pos;       /* offset of next byte to allocate.       */
         uint32_t    m_backing;   /* 0 = anonymous VM (default), 1 = file / */
                                  /* shared-memory mapping. Selects the     */
-                                 /* teardown path; no OS handle is kept    */
-                                 /* (the mapping outlives a closed handle).*/
+                                 /* teardown path.                         */
+        uint64_t    m_file;      /* Windows, writable file-backed arenas:  */
+                                 /* the file HANDLE, kept so rgArenaFlush  */
+                                 /* can FlushFileBuffers. 0 otherwise.     */
 
     } Arena;
 #if defined(_MSC_VER)
@@ -314,6 +316,7 @@ extern "C" {
      *  -4     : caller buffer too small
      *  -5     : file I/O / mapping failure (shared-arena create / open)
      *  -6     : bad / unrecognised persisted format (rgHashMapOpen)
+     *  -7     : key not found (rgHashIndexGet / rgHashIndexGetH)
      */
     #define RGM_ERROR_OK                   0
     #define RGM_ERROR_ERR_INVALID         -1
@@ -322,6 +325,7 @@ extern "C" {
     #define RGM_ERROR_ERR_TOO_SMALL       -4
     #define RGM_ERROR_ERR_IO              -5
     #define RGM_ERROR_ERR_FORMAT          -6
+    #define RGM_ERROR_ERR_NOT_FOUND       -7
 
     /* Flags accepted by rgArenaCreateEx (bitwise OR-able). */
     #define RGM_ARENA_FLAG_NONE            0u
@@ -333,14 +337,15 @@ extern "C" {
      * arena is created with normal pages and the call still succeeds.
      *
      * Platform notes:
-     *   - Linux / Android / *BSD : mmap + madvise(MADV_HUGEPAGE). The
+     *   - Linux / Android : mmap + madvise(MADV_HUGEPAGE). The
      *     kernel decides whether to back the reservation with huge pages;
      *     lazy commit semantics are unchanged.
      *   - macOS : no effect (POSIX MADV_HUGEPAGE is Linux-specific).
      *     The arena uses normal pages.
      *   - Windows : VirtualAlloc with MEM_LARGE_PAGES. Requires the
-     *     calling process to hold SeLockMemoryPrivilege (configured in
-     *     "Lock pages in memory" under Local Security Policy). Large
+     *     calling account to be granted SeLockMemoryPrivilege (configured in
+     *     "Lock pages in memory" under Local Security Policy); the library
+     *     enables the privilege in the process token on first use. Large
      *     pages on Windows must be committed eagerly, so the entire
      *     reservation is physically backed at create time when this flag
      *     is used and the privilege is held. Without the privilege the
@@ -396,8 +401,9 @@ extern "C" {
      *
      * Unlike the anonymous arena, the whole file is backed up front (no lazy
      * commit), so rgArenaShrink is a no-op and the reservation equals the
-     * file size. No OS handle is retained -- rgArenaDestroy unmaps the view
-     * (which also flushes dirty pages); the file itself remains on disk.
+     * file size. rgArenaDestroy unmaps the view (the OS writes dirty pages
+     * back eventually, but this is NOT a durability point -- call
+     * rgArenaFlush first for that); the file itself remains on disk.
      *
      * A HashMap built in such an arena is position-independent (all inter-
      * node links are arena-relative offsets); persist its top-level index
@@ -422,8 +428,14 @@ extern "C" {
      * POSIX unlink()s the path immediately after open (the inode lives on via
      * the mapping and vanishes when it is released). The file therefore never
      * leaks even if the process never runs its destructors. If the platform /
-     * filesystem cannot honour auto-delete the call transparently falls back to
-     * a plain shared file (the caller is then responsible for removing _path).
+     * filesystem cannot honour auto-delete the call fails with -5 rather than
+     * silently leaving a permanent file behind; use rgArenaCreateShared (and
+     * remove the file yourself) on such volumes.
+     *
+     * _path must NOT already exist: the file is created exclusively (O_EXCL /
+     * CREATE_NEW, owner-only permissions on POSIX), so a pre-planted file or
+     * symlink at _path makes the call fail instead of truncating its target.
+     * Pick a unique name per arena.
      *
      * Use this for scratch / spill files that must not outlive the process;
      * use rgArenaCreateShared for files meant to persist (e.g. on-disk maps).
@@ -450,9 +462,10 @@ extern "C" {
      */
     int32_t rgArenaOpenShared(Arena* _arena, const char* _path, int _readOnly);
 
-    /* Flush a file-backed arena's dirty pages to disk (msync / FlushViewOfFile).
-     * No-op on anonymous arenas. rgArenaDestroy already flushes via unmap;
-     * use this for an explicit mid-session durability checkpoint.
+    /* Flush a file-backed arena's dirty pages to disk and wait for the write
+     * to complete (msync(MS_SYNC) on POSIX; FlushViewOfFile + FlushFileBuffers
+     * on Windows). No-op on anonymous and read-only arenas. rgArenaDestroy
+     * does NOT guarantee durability; use this as the durability checkpoint.
      *
      * @param[in] _arena - Arena to flush.
      */
@@ -483,6 +496,8 @@ extern "C" {
      * @param[in] _path - File or directory path on the volume to test.
      * @returns 1 supported, 0 not supported, -1 undetermined (caller decides;
      *          treating -1 as supported preserves the lazy-reserve behaviour).
+     *          On Linux the filesystem type is checked (FAT / exFAT / HFS
+     *          report 0); on other POSIX systems the answer is -1.
      */
     int32_t rgVmPathSupportsSparse(const char* _path);
 
@@ -519,8 +534,11 @@ extern "C" {
      *
      * @param[in] _arena     - Arena to allocate from.
      * @param[in] _size      - Number of bytes to allocate.
-     * @param[in] _alignment - Required alignment, in bytes. Must be a power of two.
-     * @returns Pointer to the allocated block, or 0 on failure.
+     * @param[in] _alignment - Required alignment, in bytes. Must be a power of
+     *                          two, or 0 for the default. Values below 8 are
+     *                          raised to 8.
+     * @returns Pointer to the allocated block, or 0 on failure (including a
+     *          non-power-of-two _alignment).
      */
     void* rgArenaAllocAligned(Arena* _arena, uint64_t _size, uint64_t _alignment);
 
@@ -711,8 +729,8 @@ extern "C" {
      * explicit destroy. rgArenaClear / rgArenaDestroy reclaim the buffer,
      * after which _list must not be used again.
      *
-     * _blockSize is clamped up to sizeof(uint32_t) (so the in-place free
-     * chain can stash next-index links) and then rounded up to a multiple
+     * _blockSize is clamped up to sizeof(void*) (so the in-place free
+     * chain can stash next-block pointer links) and then rounded up to a multiple
      * of 16 so block N inherits the arena's 16-byte alignment for all N.
      *
      * @param[in]  _arena      - Arena to allocate the block buffer from.
@@ -790,7 +808,9 @@ extern "C" {
      *
      * @param[in] _blockSize  - Block size, in bytes (as passed to Create).
      * @param[in] _maxBlocks  - Maximum number of blocks in the list.
-     * @returns Required buffer size in bytes, or 0 on overflow / zero input.
+     * @returns Required buffer size in bytes, or 0 on overflow or zero
+     *          _maxBlocks. A zero _blockSize is valid (it is clamped / rounded
+     *          up like any other size, as Create does).
      */
     uint64_t rgFreeListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks);
 
@@ -838,7 +858,7 @@ extern "C" {
     /* Report the effective per-block size of the free list, in bytes.
      *
      * This is the size actually used by the allocator after rgFreeListCreate
-     * clamped the requested size up to sizeof(uint32_t) and rounded it up to
+     * clamped the requested size up to sizeof(void*) and rounded it up to
      * a multiple of 16. It may exceed the value originally passed to Create.
      *
      * @param[in] _list - Free list to query.
@@ -922,7 +942,9 @@ extern "C" {
      *
      * @param[in] _blockSize  - Block size, in bytes (as passed to Create).
      * @param[in] _maxBlocks  - Maximum number of blocks in the list.
-     * @returns Required buffer size in bytes, or 0 on overflow / zero input.
+     * @returns Required buffer size in bytes, or 0 on overflow or zero
+     *          _maxBlocks. A zero _blockSize is valid (it is clamped / rounded
+     *          up like any other size, as Create does).
      */
     uint64_t rgDenseListBufferSize(uint64_t _blockSize, uint32_t _maxBlocks);
 
@@ -977,7 +999,8 @@ extern "C" {
      *   uint32_t count  = rgDenseListCount(&dl);
      *   uint32_t stride = rgDenseListBlockSize(&dl);
      *   for (uint32_t i = 0; i < count; ++i) {
-     *       MyType* x = (MyType*)(base + i * stride);
+     *       MyType* x = (MyType*)(base + (size_t)i * stride); // size_t: no
+     *                                                          // u32 wrap >4 GiB
      *       ...
      *   }
      *
@@ -1141,8 +1164,9 @@ extern "C" {
      *
      * Traversal uses a fixed 64-frame stack. Reaching depth 64 requires
      * engineered full-digest hash collisions (natural depth is ~log4(N));
-     * if it ever happens, debug builds trap and release builds skip the
-     * overflowing subtree.
+     * if it ever happens, the overflowing subtree is walked by plain
+     * recursion so no entry is dropped (debug builds also trap for
+     * visibility). Recursion depth is bounded by the chain length.
      *
      * @param[in] _map      - Map to iterate.
      * @param[in] _fn       - Callback to invoke per entry. 0 is a no-op.
@@ -1174,7 +1198,9 @@ extern "C" {
      * per-key flag (callers can detect hits another way, e.g. by
      * pre-initialising _outValues to a sentinel).
      *
-     * @returns Number of hits, or a negative error code on bad arguments.
+     * @returns Number of hits (clamped to INT32_MAX; count _outFound
+     *          entries when _count may exceed that), or a negative error
+     *          code on bad arguments.
      */
     int32_t rgHashMapGetBatchU64(HashMap* _map,
                                  const uint64_t* _keys, uint64_t* _outValues,
@@ -1392,7 +1418,11 @@ extern "C" {
     int32_t rgHashIndexPut(HashIndex* _idx, Arena* _arena,
                            const void* _key, uint64_t _keyLen, uint64_t _value);
 
-    /* Lookup by bytes. Same hashing as Put. */
+    /* Lookup by bytes. Same hashing as Put.
+     *
+     * @returns RGM_ERROR_OK on hit (*_outValue written when non-null),
+     *          RGM_ERROR_ERR_NOT_FOUND on miss, RGM_ERROR_ERR_INVALID on
+     *          bad arguments. */
     int32_t rgHashIndexGet(HashIndex* _idx,
                            const void* _key, uint64_t _keyLen, uint64_t* _outValue);
 
@@ -1406,7 +1436,7 @@ extern "C" {
     int32_t rgHashIndexPutH(HashIndex* _idx, Arena* _arena,
                             uint64_t _h1, uint64_t _h2, uint64_t _value);
 
-    /* Lookup by pre-computed hash pair. */
+    /* Lookup by pre-computed hash pair. Same return codes as rgHashIndexGet. */
     int32_t rgHashIndexGetH(HashIndex* _idx,
                             uint64_t _h1, uint64_t _h2, uint64_t* _outValue);
 

@@ -25,7 +25,13 @@
 #define RGM_PLATFORM_POSIX          0
 
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__)
-#   if !defined(WINAPI_FAMILY) || (WINAPI_FAMILY == WINAPI_FAMILY_DESKTOP_APP)
+    /* WINAPI_FAMILY_DESKTOP_APP is defined by <winapifamily.h>. Without it the
+     * comparison below would evaluate two undefined identifiers as 0 == 0 and
+     * accept UWP / WinRT builds as desktop. */
+#   if defined(WINAPI_FAMILY)
+#       include <winapifamily.h>
+#   endif
+#   if !defined(WINAPI_FAMILY) || (defined(WINAPI_FAMILY_DESKTOP_APP) && WINAPI_FAMILY == WINAPI_FAMILY_DESKTOP_APP)
 #       undef  RGM_PLATFORM_WINDOWS
 #       define RGM_PLATFORM_WINDOWS     1
 #   endif
@@ -56,6 +62,12 @@
 #   include <sys/stat.h>
 #   include <unistd.h>
 #   include <fcntl.h>
+#   if defined(__linux__)
+#       include <sys/vfs.h>    /* statfs: rgVmPathSupportsSparse */
+#   elif defined(__APPLE__)
+#       include <sys/param.h>
+#       include <sys/mount.h>  /* statfs: rgVmPathSupportsSparse */
+#   endif
 #   if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
 #       define MAP_ANONYMOUS MAP_ANON
 #   endif
@@ -76,6 +88,15 @@
  * only surface later from arena.c's platform-include block. */
 #if !RGM_PLATFORM_WINDOWS && !RGM_PLATFORM_POSIX
 #   error "Platform not supported (no platform macro selected)!"
+#endif
+
+/* Little-endian only: the hash loads, the U64 <-> byte-key hash equivalence
+ * and the persisted HashMap layout all assume it. Fail loudly rather than
+ * silently mis-matching keys on a big-endian target. (MSVC targets are all
+ * little-endian and do not define __BYTE_ORDER__.) */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) \
+ && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#   error "rg_memory supports little-endian targets only!"
 #endif
 
 /* -------------------------------------------------------------------------

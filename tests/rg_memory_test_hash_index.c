@@ -20,8 +20,8 @@ void rgMemoryTest_hashIndexZeroInitIsEmpty(void)
     HashIndex idx;
     memset(&idx, 0, sizeof(idx));
     uint64_t v = 0;
-    TEST_ASSERT_EQUAL_INT(-1, rgHashIndexGet(&idx, "k", 1, &v));
-    TEST_ASSERT_EQUAL_INT(-1, rgHashIndexGetH(&idx, 0xdeadbeef, 0xcafef00d, &v));
+    TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_NOT_FOUND, rgHashIndexGet(&idx, "k", 1, &v));
+    TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_NOT_FOUND, rgHashIndexGetH(&idx, 0xdeadbeef, 0xcafef00d, &v));
 }
 
 void rgMemoryTest_hashIndexNullPointerIsSafe(void)
@@ -69,7 +69,7 @@ void rgMemoryTest_hashIndexGetMissReturnsError(void)
     rgHashIndexInit(&idx);
 
     uint64_t v = 0xdeadbeef;
-    TEST_ASSERT_EQUAL_INT(-1, rgHashIndexGet(&idx, "missing", 7, &v));
+    TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_NOT_FOUND, rgHashIndexGet(&idx, "missing", 7, &v));
     TEST_ASSERT_EQUAL_UINT64(0xdeadbeef, v); /* untouched on miss */
 
     rgArenaDestroy(&a);
@@ -202,7 +202,7 @@ void rgMemoryTest_hashIndexPutHGetHBasic(void)
 
     /* h1 match but h2 mismatch must NOT yield the entry. */
     v = 0xdeadbeef;
-    TEST_ASSERT_EQUAL_INT(-1, rgHashIndexGetH(&idx, 0xAAAA, 0xFFFF, &v));
+    TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_NOT_FOUND, rgHashIndexGetH(&idx, 0xAAAA, 0xFFFF, &v));
     TEST_ASSERT_EQUAL_UINT64(0xdeadbeef, v);
 
     rgArenaDestroy(&a);
@@ -447,13 +447,70 @@ void rgMemoryTest_hashIndexSharedH1StaysShallow(void)
     /* A shared-h1 lookup with an unused h2 must still miss -- descent must
      * not stop early just because h1 matches a node along the chain. */
     uint64_t v = 0xdeadbeef;
-    TEST_ASSERT_EQUAL_INT(-1, rgHashIndexGetH(&idx, H1, (uint64_t)N + 1000u, &v));
+    TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_NOT_FOUND, rgHashIndexGetH(&idx, H1, (uint64_t)N + 1000u, &v));
     TEST_ASSERT_EQUAL_UINT64(0xdeadbeef, v);
 
     index_foreach_ctx c = {0, 0, 0, 0};
     uint64_t visited = rgHashIndexForEach(&idx, index_foreach_collect, &c);
     TEST_ASSERT_EQUAL_UINT64((uint64_t)N, visited);
     TEST_ASSERT_EQUAL_INT((int)N, c.count);
+
+    rgArenaDestroy(&a);
+}
+
+/* -------------------------------------------------------------------------
+ * Hash zero-class regression. With an unprotected wyhash finalizer, any key
+ * whose last-16-bytes' first word equals the WYP1 constant multiplied to 0
+ * under EVERY seed, so two such keys got identical (h1, h2) = (0, 0) and
+ * HashIndex treated them as one entry.
+ * ------------------------------------------------------------------------- */
+
+static void rgm_test_store_le64(uint8_t* _p, uint64_t _v)
+{
+    int i;
+    for (i = 0; i < 8; ++i) _p[i] = (uint8_t)(_v >> (8 * i));
+}
+
+void rgMemoryTest_hashIndexZeroClassKeysStayDistinct(void)
+{
+    const uint64_t WYP1 = 0x8bb84b93962eacc9ull;
+    const uint64_t WYP0 = 0x2d358dccaa6c78a5ull;
+    /* Word patterns that zero one multiplicand of the final mix under the old
+     * (WYP1) and new (WYP1 ^ seed) formulations. */
+    const uint64_t words[2] = { WYP1, WYP1 ^ WYP0 };
+    Arena a;
+    rgArenaCreate(&a, 1024 * 1024);
+
+    int w;
+    for (w = 0; w < 2; ++w)
+    {
+        HashIndex idx;
+        rgHashIndexInit(&idx);
+        enum { N = 64, LEN = 32 };
+        uint8_t keys[N][LEN];
+        int i;
+        for (i = 0; i < N; ++i)
+        {
+            memset(keys[i], 0, LEN);
+            keys[i][0] = (uint8_t)i;                     /* differs per key      */
+            keys[i][1] = (uint8_t)(i * 37 + 1);
+            rgm_test_store_le64(&keys[i][LEN - 16], words[w]); /* zero-class word */
+            TEST_ASSERT_EQUAL_INT(0, rgHashIndexPut(&idx, &a, keys[i], LEN, 1000u + (uint64_t)i));
+        }
+        for (i = 0; i < N; ++i)
+        {
+            uint64_t v = 0;
+            TEST_ASSERT_EQUAL_INT(0, rgHashIndexGet(&idx, keys[i], LEN, &v));
+            TEST_ASSERT_EQUAL_UINT64(1000u + (uint64_t)i, v);
+        }
+        /* A never-inserted key from the same class must miss. */
+        uint8_t other[LEN];
+        memset(other, 0, LEN);
+        other[0] = 0xEE;
+        rgm_test_store_le64(&other[LEN - 16], words[w]);
+        uint64_t v = 0;
+        TEST_ASSERT_EQUAL_INT(RGM_ERROR_ERR_NOT_FOUND, rgHashIndexGet(&idx, other, LEN, &v));
+    }
 
     rgArenaDestroy(&a);
 }
@@ -488,4 +545,5 @@ void rgMemoryTest_HashIndex(void)
     RUN_TEST(rgMemoryTest_hashIndexMultiArenaCoexistence);
 
     RUN_TEST(rgMemoryTest_hashIndexSharedH1StaysShallow);
+    RUN_TEST(rgMemoryTest_hashIndexZeroClassKeysStayDistinct);
 }
