@@ -115,6 +115,9 @@ size_t   rgFreeListBufferSize(size_t blockSize, uint32_t maxBlocks);
 
 void*    rgFreeListAlloc(FreeList* fl);
 void     rgFreeListFree(FreeList* fl, void* ptr);
+/* Header-inline fast paths (no call; FreeFast skips debug pointer checks) */
+void*    rgFreeListAllocFast(FreeList* fl);
+void     rgFreeListFreeFast(FreeList* fl, void* ptr);
 int      rgFreeListCheckPtr(FreeList* fl, void* ptr);
 
 uint32_t rgFreeListMaxBlocks(FreeList* fl);
@@ -139,6 +142,8 @@ void     rgDenseListFree(DenseList* dl, void* ptr);   /* swap-back */
 
 void*    rgDenseListData(DenseList* dl);
 void*    rgDenseListAt(DenseList* dl, uint32_t index);
+void*    rgDenseListAllocFast(DenseList* dl);               /* header-inline */
+void*    rgDenseListAtFast(DenseList* dl, uint32_t index);  /* header-inline */
 uint32_t rgDenseListIndexOf(DenseList* dl, void* ptr);
 
 uint32_t rgDenseListMaxBlocks(DenseList* dl);
@@ -219,6 +224,10 @@ int32_t  rgBloomFilterCreateFromMemory(void* buf, size_t bufSize, BloomFilter* o
 void     rgBloomFilterAdd    (BloomFilter* bf, const void* key, size_t keyLen);
 void     rgBloomFilterAddU64 (BloomFilter* bf, uint64_t key);
 void     rgBloomFilterAddH   (BloomFilter* bf, uint64_t h1, uint64_t h2);
+/* Non-atomic Add for single-threaded use / bulk loads (no concurrent access) */
+void     rgBloomFilterAddUnsync   (BloomFilter* bf, const void* key, uint64_t len);
+void     rgBloomFilterAddU64Unsync(BloomFilter* bf, uint64_t key);
+void     rgBloomFilterAddHUnsync  (BloomFilter* bf, uint64_t h1, uint64_t h2);
 
 int      rgBloomFilterTest    (BloomFilter* bf, const void* key, size_t keyLen);
 int      rgBloomFilterTestU64 (BloomFilter* bf, uint64_t key);
@@ -248,7 +257,8 @@ To match a classic-Bloom 1% target, allocate roughly 30% more bits / item than t
 
 | Operation                              | Safe? | Notes |
 | -------------------------------------- | :---: | ----- |
-| Concurrent `Add` from any threads      |   ✅  | Each bit-set is a release-ordered atomic OR. Two `Add`s racing on the same word just OR their masks into it; bits are monotone (0 → 1) so there's no ABA and no retry. |
+| Concurrent `Add` from any threads      |   ✅  | Each bit-set is a release-ordered atomic OR, skipped when an acquire load shows the bits are already set (so re-adding hot keys doesn't bounce the cache line between cores). Two `Add`s racing on the same word just OR their masks into it; bits are monotone (0 → 1) so there's no ABA and no retry. |
+| `Add*Unsync` with any other operation  |   ❌  | Plain (non-atomic) ORs. Use only while no other thread touches the filter, e.g. a single-threaded filter or a bulk load before publishing it. |
 | Concurrent `Test` from any threads     |   ✅  | Acquire-ordered atomic load per bit. Wait-free. |
 | Concurrent `Add` + `Test`              |   ✅  | Standard publish / consume. Any bit set by an `Add` that returned before a `Test` started is visible to that `Test`. |
 | `PopCount` during concurrent `Add`     |   ⚠️  | Plain loads — count is an approximate snapshot, useful for fill-ratio estimation. Never observes a torn value (8-byte loads are atomic on the targets we support); just no global instant. |
@@ -506,6 +516,8 @@ Each op walks the trie roughly `log₄(N)` levels deep, touching one cache line 
 The reported `B/op` figures use the *full-walk* model: `log₄(N) × 64 B`, plus one extra line on Put for the new node. With the direct-mapped top-level index enabled (the default), the first 6 of those levels collapse into a single L1-resident load, so the actual touched-bytes-per-op is roughly `(log₄(N) − 6) × 64 B + 64 B` — almost half the printed B/op at 1M and about 60% at 10M. The Mops/sec figures are exact; the printed GB/sec is the conservative upper bound implied by the displayed B/op.
 
 ### 1 000 000 keys (working set ~64 MiB nodes — fits in this CPU's 128 MiB L3)
+
+> The "batched" rows below were measured with the earlier lockstep K=8 batch walk. Batched Get now keeps up to 32 walks in flight, refills each lane as it finishes and prefetches every lane's next node. PutBatch warms each window's trie paths the same way before inserting. On a 4-core cloud VM this made batched Get ~2x and PutBatch ~1.3-1.7x faster at 1M-10M keys; the tables have not been re-measured on the original machine.
 
 | Operation                           | HashMap |   HashTrie | HashTrie MT (32 T) |
 | ----------------------------------- | ------: | ---------: | -----------------: |

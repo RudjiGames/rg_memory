@@ -567,6 +567,68 @@ void rgMemoryTest_freeListUsableAfterArenaClear(void)
     rgArenaDestroy(&a);
 }
 
+/* The header-inline fast paths must behave exactly like the exported
+ * functions, on eager and lazy lists, including exhaustion and inert lists. */
+void rgMemoryTest_freeListFastPathsMatchExported(void)
+{
+    Arena a;
+    rgArenaCreate(&a, 1024 * 1024);
+    int lazy;
+    for (lazy = 0; lazy < 2; ++lazy)
+    {
+        FreeList f1, f2;
+        if (lazy)
+        {
+            TEST_ASSERT_EQUAL_INT(0, rgFreeListCreateLazy(&a, &f1, 40, 64));
+            TEST_ASSERT_EQUAL_INT(0, rgFreeListCreateLazy(&a, &f2, 40, 64));
+        }
+        else
+        {
+            TEST_ASSERT_EQUAL_INT(0, rgFreeListCreate(&a, &f1, 40, 64));
+            TEST_ASSERT_EQUAL_INT(0, rgFreeListCreate(&a, &f2, 40, 64));
+        }
+        void* p1[64];
+        void* p2[64];
+        uint32_t step, i;
+        for (step = 0; step < 4; ++step)
+        {
+            for (i = 0; i < 64; ++i)
+            {
+                p1[i] = rgFreeListAlloc(&f1);
+                p2[i] = rgFreeListAllocFast(&f2);
+                TEST_ASSERT_NOT_NULL(p2[i]);
+                TEST_ASSERT_EQUAL_UINT64((uint8_t*)p1[i] - f1.m_buffer,
+                                         (uint8_t*)p2[i] - f2.m_buffer);
+            }
+            TEST_ASSERT_NULL(rgFreeListAllocFast(&f2)); /* exhausted */
+            for (i = 0; i < 64; i += 1u + step)
+            {
+                rgFreeListFree(&f1, p1[i]);
+                rgFreeListFreeFast(&f2, p2[i]);
+            }
+            TEST_ASSERT_EQUAL_UINT32(rgFreeListBlocksFree(&f1), rgFreeListBlocksFree(&f2));
+            /* Drain the freed ones back out so the next step starts full. */
+            for (i = 0; i < 64; i += 1u + step)
+            {
+                TEST_ASSERT_EQUAL_UINT64((uint8_t*)rgFreeListAlloc(&f1) - f1.m_buffer,
+                                         (uint8_t*)rgFreeListAllocFast(&f2) - f2.m_buffer);
+            }
+            for (i = 0; i < 64; ++i)
+            {
+                rgFreeListFree(&f1, p1[i]);
+                rgFreeListFreeFast(&f2, p2[i]);
+            }
+        }
+    }
+    FreeList z;
+    memset(&z, 0, sizeof(z));
+    TEST_ASSERT_NULL(rgFreeListAllocFast(&z));
+    TEST_ASSERT_NULL(rgFreeListAllocFast(NULL));
+    rgFreeListFreeFast(&z, &z);  /* no-op on an inert list */
+    rgFreeListFreeFast(NULL, &z);
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Entry point invoked from rg_memory_test.c
  * ------------------------------------------------------------------------- */
@@ -620,4 +682,5 @@ void rgMemoryTest_FreeList(void)
     RUN_TEST(rgMemoryTest_freeListLargePool);
     RUN_TEST(rgMemoryTest_freeListMultipleListsCoexist);
     RUN_TEST(rgMemoryTest_freeListUsableAfterArenaClear);
+    RUN_TEST(rgMemoryTest_freeListFastPathsMatchExported);
 }

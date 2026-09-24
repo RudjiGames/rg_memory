@@ -187,11 +187,24 @@
  * are in flight at once; harmless elsewhere (just a no-op hint).
  * ------------------------------------------------------------------------- */
 
+/* 8-byte copy that is safe under strict aliasing and never calls the CRT.
+ * GCC/Clang expand the fixed-size builtin inline (even at -O0). MSVC does no
+ * type-based alias analysis, so a plain uint64 move is fine; callers pass
+ * 8-byte-aligned pointers. */
+#if defined(__GNUC__) || defined(__clang__)
+#   define RGM_COPY8(_dst, _src) __builtin_memcpy((_dst), (_src), 8)
+#else
+#   define RGM_COPY8(_dst, _src) (*(uint64_t*)(void*)(_dst) = *(const uint64_t*)(const void*)(_src))
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #   define RGM_PREFETCH_READ(_p) __builtin_prefetch((const void*)(_p), 0, 3)
-#elif defined(_MSC_VER)
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #   include <intrin.h>
 #   define RGM_PREFETCH_READ(_p) _mm_prefetch((const char*)(_p), _MM_HINT_T0)
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+#   include <intrin.h>
+#   define RGM_PREFETCH_READ(_p) __prefetch((const void*)(_p))
 #else
 #   define RGM_PREFETCH_READ(_p) ((void)(_p))
 #endif

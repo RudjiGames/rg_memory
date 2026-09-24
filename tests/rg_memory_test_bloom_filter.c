@@ -279,6 +279,41 @@ void rgMemoryTest_bloomFilterClearResets(void)
     rgArenaDestroy(&a);
 }
 
+/* The Unsync Add variants must set exactly the same bits as the atomic ones. */
+void rgMemoryTest_bloomFilterUnsyncMatchesAtomic(void)
+{
+    Arena a;
+    rgArenaCreate(&a, 1024 * 1024);
+    BloomFilter f1, f2;
+    TEST_ASSERT_EQUAL_INT32(0, rgBloomFilterCreate(&a, &f1, 1u << 16, 7));
+    TEST_ASSERT_EQUAL_INT32(0, rgBloomFilterCreate(&a, &f2, 1u << 16, 7));
+
+    uint64_t i;
+    for (i = 0; i < 3000; ++i)
+    {
+        char key[16];
+        uint32_t len = (uint32_t)(i % 13) + 1u;
+        uint32_t j;
+        for (j = 0; j < len; ++j) key[j] = (char)('a' + (i * 7 + j) % 26);
+        rgBloomFilterAdd(&f1, key, len);          rgBloomFilterAddUnsync(&f2, key, len);
+        rgBloomFilterAddU64(&f1, i * 977u);       rgBloomFilterAddU64Unsync(&f2, i * 977u);
+        rgBloomFilterAddH(&f1, i, ~i);            rgBloomFilterAddHUnsync(&f2, i, ~i);
+    }
+    TEST_ASSERT_EQUAL_UINT64(rgBloomFilterBitCount(&f1), rgBloomFilterBitCount(&f2));
+    TEST_ASSERT_EQUAL_MEMORY(f1.m_bits, f2.m_bits, rgBloomFilterBitCount(&f1) / 8u);
+    for (i = 0; i < 3000; ++i)
+    {
+        TEST_ASSERT_EQUAL_INT(1, rgBloomFilterTestU64(&f2, i * 977u));
+    }
+    /* Inert filter: no-op. */
+    BloomFilter z;
+    memset(&z, 0, sizeof(z));
+    rgBloomFilterAddU64Unsync(&z, 1);
+    rgBloomFilterAddUnsync(&z, "x", 1);
+    rgBloomFilterAddHUnsync(&z, 1, 2);
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Test entry
  * ------------------------------------------------------------------------- */
@@ -296,4 +331,5 @@ void rgMemoryTest_BloomFilter(void)
     RUN_TEST(rgMemoryTest_bloomFilterPreHashedRoundTrip);
     RUN_TEST(rgMemoryTest_bloomFilterFalsePositiveSanity);
     RUN_TEST(rgMemoryTest_bloomFilterClearResets);
+    RUN_TEST(rgMemoryTest_bloomFilterUnsyncMatchesAtomic);
 }
