@@ -314,17 +314,110 @@ int32_t rgHashTrieGetU64(HashTrie* restrict _trie, uint64_t _key, uint64_t* rest
 /* -------------------------------------------------------------------------
  * Bulk uint64 API. Hot path -- both the single-thread "Get (rand, batched)"
  * and the MT "Get (aggregate, batched)" passes route through GetBatchU64.
- * Put is a simple loop (CAS retry semantics + per-Put walks aren't
- * independent across keys, so pipelining doesn't help); Get is software-
- * pipelined with K=8 parallel walks per batch.
- *
- * Note: software prefetch hints were measured to *hurt* throughput on
- * this code path -- same finding as HashIndex / HashMap. The K-fold
- * load parallelism is what wins; extra prefetches just compete for
- * LSU slots.
+ * Get is an AMAC walk (refill-on-finish lanes + next-node prefetch); Put
+ * warms each window's paths with the same walk, then runs the serial
+ * PutU64 loop, whose CAS semantics are unchanged.
  * ------------------------------------------------------------------------- */
 
-#define RGM_HASH_TRIE_BATCH_K 8u
+/* AMAC batched walks: see the rg_hash_map.c batch section for the design
+ * and measurements. Same scheme here, with atomic-acquire slot loads. */
+#define RGM_HASH_TRIE_BATCH_K 32u
+#define RGM_HASH_TRIE_PUT_WINDOW 32u
+
+/* AMAC walk of _count uint64 keys. _outValues != 0: batched Get (returns the
+ * hit count). _outValues == 0: read-only cache warm-up for PutBatch. Prefetch
+ * of a null child pointer is a no-op hint (it never faults). */
+static uint64_t rgm_hash_trie_batch_walk(HashTrie* restrict _trie,
+                                         const uint64_t* restrict _keys,
+                                         uint64_t* restrict _outValues,
+                                         int* restrict _outFound,
+                                         uint32_t _count)
+{
+    uint64_t hits = 0;
+
+    uint64_t key [RGM_HASH_TRIE_BATCH_K];
+    uint64_t hful[RGM_HASH_TRIE_BATCH_K];
+    uint64_t h   [RGM_HASH_TRIE_BATCH_K];
+    uint64_t cur [RGM_HASH_TRIE_BATCH_K];
+    uint32_t idx [RGM_HASH_TRIE_BATCH_K];   /* key index, UINT32_MAX = idle lane */
+    uint32_t rnd [RGM_HASH_TRIE_BATCH_K];
+    uint32_t next = 0;
+    uint32_t live = 0;
+    uint32_t i;
+
+    for (i = 0; i < RGM_HASH_TRIE_BATCH_K; ++i)
+    {
+        idx[i] = UINT32_MAX;
+        cur[i] = 0;
+        if (next < _count)
+        {
+            uint32_t j = next++;
+            idx[i]  = j;
+            key[i]  = _keys[j];
+            hful[i] = rgm_hash_u64(key[i]);
+            h[i]    = RGM_HASH_TRIE_DESCEND(hful[i]);
+            cur[i]  = (uint64_t)rgm_atomic_load_i64(
+                          (const rgm_atomic_i64*)RGM_HASH_TRIE_ROOT(_trie, hful[i]));
+            rnd[i]  = 0;
+            RGM_PREFETCH_READ((const void*)(uintptr_t)cur[i]);
+            if (_outFound) _outFound[j] = 0;
+            ++live;
+        }
+    }
+
+    while (live != 0)
+    {
+        for (i = 0; i < RGM_HASH_TRIE_BATCH_K; ++i)
+        {
+            if (idx[i] == UINT32_MAX) continue;
+
+            uint64_t c = cur[i];
+            if (c != 0)
+            {
+                const HashNode* n = (const HashNode*)(uintptr_t)c;
+                if (!(n->m_hash == hful[i]
+                   && n->m_keyLen == 8u
+                   && rgm_hash_load_u64(rgm_hash_node_key(n)) == key[i]))
+                {
+                    cur[i] = (uint64_t)rgm_atomic_load_i64(
+                                 (const rgm_atomic_i64*)&n->m_child[h[i] >> 62]);
+                    RGM_PREFETCH_READ((const void*)(uintptr_t)cur[i]);
+                    h[i] <<= 2;
+                    if (h[i] == 0) { h[i] = rgm_hash_reseed_u64(key[i], ++rnd[i]); }
+                    continue;
+                }
+                if (_outValues)
+                {
+                    _outValues[idx[i]] = (uint64_t)rgm_atomic_load_i64(
+                                             (const rgm_atomic_i64*)&n->m_value);
+                    if (_outFound) _outFound[idx[i]] = 1;
+                }
+                ++hits;
+            }
+
+            /* Lane finished (hit or empty slot): refill it. */
+            if (next < _count)
+            {
+                uint32_t j = next++;
+                idx[i]  = j;
+                key[i]  = _keys[j];
+                hful[i] = rgm_hash_u64(key[i]);
+                h[i]    = RGM_HASH_TRIE_DESCEND(hful[i]);
+                cur[i]  = (uint64_t)rgm_atomic_load_i64(
+                              (const rgm_atomic_i64*)RGM_HASH_TRIE_ROOT(_trie, hful[i]));
+                rnd[i]  = 0;
+                RGM_PREFETCH_READ((const void*)(uintptr_t)cur[i]);
+                if (_outFound) _outFound[j] = 0;
+            }
+            else
+            {
+                idx[i] = UINT32_MAX;
+                --live;
+            }
+        }
+    }
+    return hits;
+}
 
 int32_t rgHashTriePutBatchU64(HashTrie* restrict _trie, Arena* restrict _arena,
                               const uint64_t* restrict _keys,
@@ -344,14 +437,25 @@ int32_t rgHashTriePutBatchU64(HashTrie* restrict _trie, Arena* restrict _arena,
         return RGM_ERROR_ERR_INVALID;
     }
 
-    uint32_t i;
-    for (i = 0; i < _count; ++i)
+    /* Warm each window's paths with a parallel read-only walk, then run the
+     * unchanged serial PutU64 loop (same CAS publish / ordering as before). */
+    uint32_t done = 0;
+    while (done < _count)
     {
-        int32_t rc = rgHashTriePutU64(_trie, _arena, _keys[i], _values[i]);
-        if (rc != RGM_ERROR_OK)
+        uint32_t n = (_count - done) < RGM_HASH_TRIE_PUT_WINDOW
+                   ? (_count - done) : RGM_HASH_TRIE_PUT_WINDOW;
+        (void)rgm_hash_trie_batch_walk(_trie, _keys + done, 0, 0, n);
+
+        uint32_t i;
+        for (i = done; i < done + n; ++i)
         {
-            return rc;
+            int32_t rc = rgHashTriePutU64(_trie, _arena, _keys[i], _values[i]);
+            if (rc != RGM_ERROR_OK)
+            {
+                return rc;
+            }
         }
+        done += n;
     }
     return RGM_ERROR_OK;
 }
@@ -375,72 +479,8 @@ int32_t rgHashTrieGetBatchU64(HashTrie* restrict _trie,
     }
 
     /* 64-bit accumulator: _count is u32, so > 2^31 hits would overflow int32 (negative return
-     * colliding with RGM_ERROR_*). Clamped at return. */
-    uint64_t hits = 0;
-
-    uint64_t              hfull[RGM_HASH_TRIE_BATCH_K];
-    uint64_t              h    [RGM_HASH_TRIE_BATCH_K];
-    const rgm_atomic_i64* slot [RGM_HASH_TRIE_BATCH_K];
-    uint8_t               active[RGM_HASH_TRIE_BATCH_K];
-    uint32_t              round [RGM_HASH_TRIE_BATCH_K];
-
-    /* Advance by the batch actually processed (n), not by RGM_HASH_TRIE_BATCH_K: a fixed
-     * stride would wrap base past UINT32_MAX when _count is within RGM_HASH_TRIE_BATCH_K of it,
-     * restarting the loop forever. base + n never exceeds _count. */
-    uint32_t base;
-    uint32_t n;
-    for (base = 0; base < _count; base += n)
-    {
-        n = (_count - base) < RGM_HASH_TRIE_BATCH_K
-          ? (_count - base) : RGM_HASH_TRIE_BATCH_K;
-
-        uint32_t i;
-        for (i = 0; i < n; ++i)
-        {
-            hfull[i]  = rgm_hash_u64(_keys[base + i]);
-            h[i]      = RGM_HASH_TRIE_DESCEND(hfull[i]);
-            slot[i]   = (const rgm_atomic_i64*)RGM_HASH_TRIE_ROOT(_trie, hfull[i]);
-            active[i] = 1;
-            round[i]  = 0;
-            if (_outFound) _outFound[base + i] = 0;
-        }
-
-        int any = 1;
-        while (any)
-        {
-            any = 0;
-            for (i = 0; i < n; ++i)
-            {
-                if (!active[i]) continue;
-
-                uint64_t cur = (uint64_t)rgm_atomic_load_i64(slot[i]);
-                if (cur == 0)
-                {
-                    active[i] = 0;
-                    continue;
-                }
-
-                HashNode* node = (HashNode*)(uintptr_t)cur;
-                if (node->m_hash == hfull[i]
-                 && node->m_keyLen == 8u
-                 && rgm_hash_load_u64(rgm_hash_node_key(node)) == _keys[base + i])
-                {
-                    _outValues[base + i] = (uint64_t)rgm_atomic_load_i64(
-                                                (const rgm_atomic_i64*)&node->m_value);
-                    if (_outFound) _outFound[base + i] = 1;
-                    active[i] = 0;
-                    hits++;
-                    continue;
-                }
-
-                slot[i] = (const rgm_atomic_i64*)&node->m_child[h[i] >> 62];
-                h[i]  <<= 2;
-                if (h[i] == 0) { h[i] = rgm_hash_reseed_u64(_keys[base + i], ++round[i]); }
-                any = 1;
-            }
-        }
-    }
-
+     * colliding with RGM_ERROR_*). Clamped here. */
+    uint64_t hits = rgm_hash_trie_batch_walk(_trie, _keys, _outValues, _outFound, _count);
     return hits > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)hits;
 }
 
@@ -535,6 +575,16 @@ uint64_t rgHashTrieForEach(HashTrie* _trie, rgHashTrieForEachFn _fn, void* _user
             if (!f->visited)
             {
                 f->visited = 1;
+                /* Prefetch the children now (the DFS visits them next); see
+                 * rgHashMapForEach. A null child is a no-op hint. */
+                {
+                    int c;
+                    for (c = 0; c < 4; ++c)
+                    {
+                        RGM_PREFETCH_READ((const void*)(uintptr_t)rgm_atomic_load_i64(
+                                              (const rgm_atomic_i64*)&f->node->m_child[c]));
+                    }
+                }
                 uint64_t v = (uint64_t)rgm_atomic_load_i64(
                                 (const rgm_atomic_i64*)&f->node->m_value);
                 stop = _fn(rgm_hash_node_key_ext(f->node, nocopy), f->node->m_keyLen, v, _userData);

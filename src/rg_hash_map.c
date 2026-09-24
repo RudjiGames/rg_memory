@@ -608,16 +608,121 @@ uint64_t* rgHashMapGetU64(HashMap* restrict _map, uint64_t _key)
 
 /* -------------------------------------------------------------------------
  * Bulk uint64 API. Hot path -- the benchmark's batched Get pass routes
- * through here. Put is a simple loop (per-Put walks aren't independent
- * across keys, so pipelining buys nothing); Get is software-pipelined.
+ * through here.
  *
- * Note: software prefetch hints were measured to *hurt* throughput on
- * this code path. With K=8 lanes already issuing independent loads per
- * step, the CPU's LSU is already saturated; adding prefetch instructions
- * just competed for load slots without adding parallelism.
+ * Batched walks use asynchronous memory access chaining (AMAC): K lanes
+ * each walk one key, and a lane that finishes (hit, miss) is refilled with
+ * the next key immediately rather than waiting for the slowest lane of a
+ * fixed group. Each lane prefetches its next node as soon as the offset is
+ * known, so K independent cache misses are in flight while the loop visits
+ * the other lanes. Measured vs the previous lockstep K=8 loop (no prefetch):
+ * ~2.2x at 1M keys, ~1.6x at 10M (4 KiB pages); prefetch alone on the
+ * lockstep loop only bought ~12%, because the group still stalled on its
+ * deepest walk.
  * ------------------------------------------------------------------------- */
 
-#define RGM_HASH_BATCH_K 8u
+#define RGM_HASH_BATCH_K 32u
+
+/* AMAC walk of _count uint64 keys. With _outValues != 0 this is the batched
+ * Get (writes _outValues / _outFound, returns the hit count). With
+ * _outValues == 0 it is a read-only warm-up pass for PutBatch: it walks each
+ * key's path to its match or empty slot so the following serial Puts find
+ * those lines in cache, and writes nothing. */
+static uint64_t rgm_hash_map_batch_walk(HashMap* restrict _map,
+                                        const uint64_t* restrict _keys,
+                                        uint64_t* restrict _outValues,
+                                        int* restrict _outFound,
+                                        uint32_t _count)
+{
+    uint8_t* base = _map->m_arena->m_base;
+    uint64_t hits = 0;
+
+    uint64_t key [RGM_HASH_BATCH_K];
+    uint64_t hful[RGM_HASH_BATCH_K];
+    uint64_t h   [RGM_HASH_BATCH_K];
+    uint32_t cur [RGM_HASH_BATCH_K];
+    uint32_t idx [RGM_HASH_BATCH_K];   /* key index, UINT32_MAX = idle lane */
+    uint32_t rnd [RGM_HASH_BATCH_K];
+    uint32_t next = 0;
+    uint32_t live = 0;
+    uint32_t i;
+
+    for (i = 0; i < RGM_HASH_BATCH_K; ++i)
+    {
+        idx[i] = UINT32_MAX;
+        cur[i] = 0;
+        if (next < _count)
+        {
+            uint32_t j = next++;
+            idx[i]  = j;
+            key[i]  = _keys[j];
+            hful[i] = rgm_hash_u64(key[i]);
+            h[i]    = RGM_HASH_MAP_DESCEND(hful[i]);
+            cur[i]  = *RGM_HASH_MAP_ROOT(_map, hful[i]);
+            rnd[i]  = 0;
+            RGM_PREFETCH_READ(base + cur[i]);
+            if (_outFound) _outFound[j] = 0;
+            ++live;
+        }
+    }
+
+    while (live != 0)
+    {
+        for (i = 0; i < RGM_HASH_BATCH_K; ++i)
+        {
+            if (idx[i] == UINT32_MAX) continue;
+
+            uint32_t c = cur[i];
+            if (c != 0)
+            {
+                const HashMapNode* n = RGM_HASH_MAP_NODE_AT(base, c);
+                if (!(n->m_hash == hful[i]
+                   && n->m_keyLen == 8u
+                   && rgm_hash_load_u64(rgm_hash_map_node_key(n)) == key[i]))
+                {
+                    /* Descend one level and prefetch the child (base + 0
+                     * for an empty slot is a harmless in-bounds hint). */
+                    cur[i] = n->m_child[h[i] >> 62];
+                    RGM_PREFETCH_READ(base + cur[i]);
+                    h[i] <<= 2;
+                    if (h[i] == 0) { h[i] = rgm_hash_reseed_u64(key[i], ++rnd[i]); }
+                    continue;
+                }
+                if (_outValues)
+                {
+                    _outValues[idx[i]] = n->m_value;
+                    if (_outFound) _outFound[idx[i]] = 1;
+                }
+                ++hits;
+            }
+
+            /* Lane finished (hit or empty slot): refill it. */
+            if (next < _count)
+            {
+                uint32_t j = next++;
+                idx[i]  = j;
+                key[i]  = _keys[j];
+                hful[i] = rgm_hash_u64(key[i]);
+                h[i]    = RGM_HASH_MAP_DESCEND(hful[i]);
+                cur[i]  = *RGM_HASH_MAP_ROOT(_map, hful[i]);
+                rnd[i]  = 0;
+                RGM_PREFETCH_READ(base + cur[i]);
+                if (_outFound) _outFound[j] = 0;
+            }
+            else
+            {
+                idx[i] = UINT32_MAX;
+                --live;
+            }
+        }
+    }
+    return hits;
+}
+
+/* Keys per PutBatch window: warm the window's paths with a parallel
+ * read-only walk, then run the unchanged serial PutU64 loop over it, whose
+ * dependent loads now hit cache. Measured ~1.4x at 1M inserts, ~2x at 10M. */
+#define RGM_HASH_PUT_WINDOW 32u
 
 int32_t rgHashMapPutBatchU64(HashMap* restrict _map,
                              const uint64_t* restrict _keys,
@@ -630,16 +735,25 @@ int32_t rgHashMapPutBatchU64(HashMap* restrict _map,
         return RGM_ERROR_ERR_INVALID;
     }
 
-    uint32_t i;
-    for (i = 0; i < _count; ++i)
+    uint32_t done = 0;
+    while (done < _count)
     {
-        /* Args are validated above, so a 0 here means arena exhaustion. */
-        uint64_t* slot = rgHashMapPutU64(_map, _keys[i]);
-        if (slot == 0)
+        uint32_t n = (_count - done) < RGM_HASH_PUT_WINDOW
+                   ? (_count - done) : RGM_HASH_PUT_WINDOW;
+        (void)rgm_hash_map_batch_walk(_map, _keys + done, 0, 0, n);
+
+        uint32_t i;
+        for (i = done; i < done + n; ++i)
         {
-            return RGM_ERROR_ERR_NO_MEMORY;
+            /* Args are validated above, so a 0 here means arena exhaustion. */
+            uint64_t* slot = rgHashMapPutU64(_map, _keys[i]);
+            if (slot == 0)
+            {
+                return RGM_ERROR_ERR_NO_MEMORY;
+            }
+            *slot = _values[i];
         }
-        *slot = _values[i];
+        done += n;
     }
     return RGM_ERROR_OK;
 }
@@ -656,73 +770,9 @@ int32_t rgHashMapGetBatchU64(HashMap* restrict _map,
         return RGM_ERROR_ERR_INVALID;
     }
 
-    uint8_t* base = _map->m_arena->m_base;
     /* 64-bit accumulator: _count is u32, so > 2^31 hits in one call would overflow a plain int32
-     * (UB, and a negative return colliding with the RGM_ERROR_* codes). Clamped at return. */
-    uint64_t hits = 0;
-
-    uint64_t        hfull[RGM_HASH_BATCH_K];
-    uint64_t        h    [RGM_HASH_BATCH_K];
-    const uint32_t* slot [RGM_HASH_BATCH_K];
-    uint8_t         active[RGM_HASH_BATCH_K];
-    uint32_t        round [RGM_HASH_BATCH_K];
-
-    /* Advance by the batch actually processed (n), not by RGM_HASH_BATCH_K: a fixed
-     * stride would wrap batchBase past UINT32_MAX when _count is within RGM_HASH_BATCH_K of it,
-     * restarting the loop forever. batchBase + n never exceeds _count. */
-    uint32_t batchBase;
-    uint32_t n;
-    for (batchBase = 0; batchBase < _count; batchBase += n)
-    {
-        n = (_count - batchBase) < RGM_HASH_BATCH_K
-          ? (_count - batchBase) : RGM_HASH_BATCH_K;
-
-        uint32_t i;
-        for (i = 0; i < n; ++i)
-        {
-            hfull[i]  = rgm_hash_u64(_keys[batchBase + i]);
-            h[i]      = RGM_HASH_MAP_DESCEND(hfull[i]);
-            slot[i]   = RGM_HASH_MAP_ROOT(_map, hfull[i]);
-            active[i] = 1;
-            round[i]  = 0;
-            if (_outFound) _outFound[batchBase + i] = 0;
-        }
-
-        int any = 1;
-        while (any)
-        {
-            any = 0;
-            for (i = 0; i < n; ++i)
-            {
-                if (!active[i]) continue;
-
-                uint32_t cur = *slot[i];
-                if (cur == 0)
-                {
-                    active[i] = 0;
-                    continue;
-                }
-
-                HashMapNode* node = RGM_HASH_MAP_NODE_AT(base, cur);
-                if (node->m_hash == hfull[i]
-                 && node->m_keyLen == 8u
-                 && rgm_hash_load_u64(rgm_hash_map_node_key(node)) == _keys[batchBase + i])
-                {
-                    _outValues[batchBase + i] = node->m_value;
-                    if (_outFound) _outFound[batchBase + i] = 1;
-                    active[i] = 0;
-                    hits++;
-                    continue;
-                }
-
-                slot[i] = &node->m_child[h[i] >> 62];
-                h[i]  <<= 2;
-                if (h[i] == 0) { h[i] = rgm_hash_reseed_u64(_keys[batchBase + i], ++round[i]); }
-                any = 1;
-            }
-        }
-    }
-
+     * (UB, and a negative return colliding with the RGM_ERROR_* codes). Clamped here. */
+    uint64_t hits = rgm_hash_map_batch_walk(_map, _keys, _outValues, _outFound, _count);
     return hits > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)hits;
 }
 
@@ -812,6 +862,14 @@ uint64_t rgHashMapForEach(HashMap* _map, rgHashMapForEachFn _fn, void* _userData
             if (!f->visited)
             {
                 f->visited = 1;
+                /* Prefetch the children now: the DFS visits them next, and each
+                 * step is otherwise one dependent cache miss. The callback runs
+                 * while the lines arrive (~1.5-1.9x at 1M-10M nodes). Offset 0
+                 * (empty) prefetches base, a harmless hint. */
+                RGM_PREFETCH_READ(base + f->node->m_child[0]);
+                RGM_PREFETCH_READ(base + f->node->m_child[1]);
+                RGM_PREFETCH_READ(base + f->node->m_child[2]);
+                RGM_PREFETCH_READ(base + f->node->m_child[3]);
                 stop = _fn(rgm_hash_map_node_key(f->node), f->node->m_keyLen,
                            f->node->m_value, _userData);
                 count++;

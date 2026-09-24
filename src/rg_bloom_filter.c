@@ -258,7 +258,13 @@ static RGM_FORCEINLINE void rgm_bloom_add_h(BloomFilter* _bf, uint64_t _h1, uint
     }
     for (i = 0; i < RGM_BLOOM_BLOCK_WORDS; ++i)
     {
-        if (wmask[i] != 0)
+        /* Skip the locked RMW when every bit is already set: bits only
+         * ever go 0 -> 1, so an acquire load that sees them all is as good as
+         * the OR (and synchronises with the writer that set them). Avoids
+         * cache-line ping-pong when threads re-add hot keys (~2.2x at 4
+         * threads) and ~1.5x on single-thread re-adds; new keys unchanged. */
+        if (wmask[i] != 0
+         && ((uint64_t)rgm_atomic_load_i64((const rgm_atomic_i64*)&block[i]) & wmask[i]) != wmask[i])
         {
             rgm_atomic_or_i64((rgm_atomic_i64*)&block[i], (int64_t)wmask[i]);
         }

@@ -507,6 +507,8 @@ The reported `B/op` figures use the *full-walk* model: `log₄(N) × 64 B`, plus
 
 ### 1 000 000 keys (working set ~64 MiB nodes — fits in this CPU's 128 MiB L3)
 
+> The "batched" rows below were measured with the earlier lockstep K=8 batch walk. Batched Get now keeps up to 32 walks in flight, refills each lane as it finishes and prefetches every lane's next node. PutBatch warms each window's trie paths the same way before inserting. On a 4-core cloud VM this made batched Get ~2x and PutBatch ~1.3-1.7x faster at 1M-10M keys; the tables have not been re-measured on the original machine.
+
 | Operation                           | HashMap |   HashTrie | HashTrie MT (32 T) |
 | ----------------------------------- | ------: | ---------: | -----------------: |
 | Put (Mops/sec)                      |   26.41 |      22.74 |  177.38 (aggregate)|

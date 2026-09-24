@@ -516,6 +516,57 @@ void rgMemoryTest_hashMapGetBatchU64NullOutFound(void)
     rgArenaDestroy(&a);
 }
 
+
+/* Deterministic key stream shared by the batch cross-check tests. */
+static uint64_t rgm_test_batch_key(uint32_t _i)
+{
+    uint64_t x = (uint64_t)_i * 0x9e3779b97f4a7c15ull + 0x1234567ull;
+    x ^= x >> 29;
+    return x;
+}
+
+/* Batch walks refill lanes as keys finish (AMAC), so cover odd counts,
+ * duplicate keys inside one window, misses, and compare every result with
+ * the single-key API. */
+void rgMemoryTest_hashMapBatchMatchesSingle(void)
+{
+    enum { N = 5000, Q = 2 * N + 7 };
+    static uint64_t keys[N], vals[N], q[Q], out[Q];
+    static int      found[Q];
+    Arena a;
+    TEST_ASSERT_EQUAL_INT(0, rgArenaCreate(&a, 64ull * 1024 * 1024));
+    HashMap m;
+    TEST_ASSERT_EQUAL_INT(0, rgHashMapInit(&m, &a));
+
+    uint32_t i;
+    for (i = 0; i < N; ++i) { keys[i] = rgm_test_batch_key(i); vals[i] = i + 1u; }
+    /* Duplicates inside one PutBatch window: the later value must win. */
+    keys[10] = keys[3]; vals[10] = 777u;
+    TEST_ASSERT_EQUAL_INT(0, rgHashMapPutBatchU64(&m, keys, vals, N));
+    TEST_ASSERT_EQUAL_UINT64(777u, *rgHashMapGetU64(&m, keys[3]));
+
+    for (i = 0; i < Q; ++i) q[i] = rgm_test_batch_key(i % 3 == 0 ? i / 3 : N + i);
+
+    static const uint32_t counts[] = { 0, 1, 5, 31, 32, 33, 100, Q };
+    uint32_t c;
+    for (c = 0; c < sizeof(counts) / sizeof(counts[0]); ++c)
+    {
+        uint32_t n = counts[c];
+        for (i = 0; i < n; ++i) { out[i] = 0xdeadull; found[i] = 7; }
+        int32_t hits = rgHashMapGetBatchU64(&m, q, out, found, n);
+        int32_t expect = 0;
+        for (i = 0; i < n; ++i)
+        {
+            uint64_t* v = rgHashMapGetU64(&m, q[i]);
+            TEST_ASSERT_EQUAL_INT(v != 0, found[i]);
+            if (v) { TEST_ASSERT_EQUAL_UINT64(*v, out[i]); ++expect; }
+            else   { TEST_ASSERT_EQUAL_UINT64(0xdeadull, out[i]); }
+        }
+        TEST_ASSERT_EQUAL_INT(expect, hits);
+    }
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Entry point invoked from rg_memory_test.c
  * ------------------------------------------------------------------------- */
@@ -552,4 +603,5 @@ void rgMemoryTest_HashMap(void)
     RUN_TEST(rgMemoryTest_hashMapPutGetBatchU64Basic);
     RUN_TEST(rgMemoryTest_hashMapGetBatchU64HandlesMisses);
     RUN_TEST(rgMemoryTest_hashMapGetBatchU64NullOutFound);
+    RUN_TEST(rgMemoryTest_hashMapBatchMatchesSingle);
 }

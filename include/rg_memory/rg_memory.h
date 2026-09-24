@@ -1178,9 +1178,10 @@ extern "C" {
 
     /* Bulk insert / overwrite of uint64-keyed entries.
      *
-     * Equivalent to looping over rgHashMapPutU64; provided as an API entry
-     * point so a real future implementation can pipeline if profiling on
-     * the engine's workload shows it's worth it. Returns the first error
+     * Same result as looping over rgHashMapPutU64 (later duplicates win),
+     * but each window of keys first gets a parallel read-only walk that
+     * pulls its trie paths into cache, so the serial inserts that follow
+     * mostly hit cache (~1.3-2x faster than the plain loop). Returns the first error
      * encountered (e.g. arena exhausted partway through), in which case
      * earlier entries are inserted and later ones are not. Returns OK
      * when all _count entries were inserted.
@@ -1190,9 +1191,10 @@ extern "C" {
                                  uint32_t _count);
 
     /* Bulk lookup of uint64-keyed entries with software-pipelined trie
-     * walks: groups of keys are walked in lockstep so the CPU can issue
-     * independent slot loads in parallel, hiding cache miss latency that
-     * a serial loop would expose one-by-one. On hit, _outValues[i] is set
+     * walks: up to 32 keys are walked concurrently, each lane is refilled
+     * with the next key as soon as it finishes, and every lane prefetches
+     * its next node, so many independent cache misses are in flight
+     * instead of one per serial Get. On hit, _outValues[i] is set
      * and _outFound[i] is set to 1; on miss, _outFound[i] is set to 0 and
      * _outValues[i] is left unchanged. _outFound may be 0 to skip the
      * per-key flag (callers can detect hits another way, e.g. by

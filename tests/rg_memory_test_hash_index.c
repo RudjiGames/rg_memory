@@ -515,6 +515,67 @@ void rgMemoryTest_hashIndexZeroClassKeysStayDistinct(void)
     rgArenaDestroy(&a);
 }
 
+
+/* Deterministic key stream shared by the batch cross-check tests. */
+static uint64_t rgm_test_batch_key(uint32_t _i)
+{
+    uint64_t x = (uint64_t)_i * 0x9e3779b97f4a7c15ull + 0x1234567ull;
+    x ^= x >> 29;
+    return x;
+}
+
+/* See rgMemoryTest_hashMapBatchMatchesSingle. Shares h1 across some entries
+ * so walks go deeper and lanes finish at different depths. */
+void rgMemoryTest_hashIndexBatchMatchesSingle(void)
+{
+    enum { N = 5000, Q = 2 * N + 7 };
+    static uint64_t h1[N], h2[N], vals[N], q1[Q], q2[Q], out[Q];
+    static int      found[Q];
+    Arena a;
+    TEST_ASSERT_EQUAL_INT(0, rgArenaCreate(&a, 64ull * 1024 * 1024));
+    HashIndex idx;
+    TEST_ASSERT_EQUAL_INT(0, rgHashIndexInit(&idx));
+
+    uint32_t i;
+    for (i = 0; i < N; ++i)
+    {
+        h1[i] = (i % 7 == 0) ? 0xABCDull : rgm_test_batch_key(i);
+        h2[i] = rgm_test_batch_key(i + 100000u);
+        vals[i] = i + 1u;
+    }
+    h1[10] = h1[3]; h2[10] = h2[3]; vals[10] = 777u;
+    TEST_ASSERT_EQUAL_INT(0, rgHashIndexPutBatchH(&idx, &a, h1, h2, vals, N));
+    uint64_t v3 = 0;
+    TEST_ASSERT_EQUAL_INT(0, rgHashIndexGetH(&idx, h1[3], h2[3], &v3));
+    TEST_ASSERT_EQUAL_UINT64(777u, v3);
+
+    for (i = 0; i < Q; ++i)
+    {
+        if (i % 3 == 0) { q1[i] = h1[(i / 3) % N]; q2[i] = h2[(i / 3) % N]; }
+        else            { q1[i] = (i % 2) ? 0xABCDull : rgm_test_batch_key(N + i); q2[i] = i; }
+    }
+
+    static const uint32_t counts[] = { 0, 1, 5, 31, 32, 33, 100, Q };
+    uint32_t c;
+    for (c = 0; c < sizeof(counts) / sizeof(counts[0]); ++c)
+    {
+        uint32_t n = counts[c];
+        for (i = 0; i < n; ++i) { out[i] = 0xdeadull; found[i] = 7; }
+        int32_t hits = rgHashIndexGetBatchH(&idx, q1, q2, out, found, n);
+        int32_t expect = 0;
+        for (i = 0; i < n; ++i)
+        {
+            uint64_t v = 0;
+            int hit = rgHashIndexGetH(&idx, q1[i], q2[i], &v) == 0;
+            TEST_ASSERT_EQUAL_INT(hit, found[i]);
+            if (hit) { TEST_ASSERT_EQUAL_UINT64(v, out[i]); ++expect; }
+            else     { TEST_ASSERT_EQUAL_UINT64(0xdeadull, out[i]); }
+        }
+        TEST_ASSERT_EQUAL_INT(expect, hits);
+    }
+    rgArenaDestroy(&a);
+}
+
 /* -------------------------------------------------------------------------
  * Entry point invoked from rg_memory_test.c
  * ------------------------------------------------------------------------- */
@@ -546,4 +607,5 @@ void rgMemoryTest_HashIndex(void)
 
     RUN_TEST(rgMemoryTest_hashIndexSharedH1StaysShallow);
     RUN_TEST(rgMemoryTest_hashIndexZeroClassKeysStayDistinct);
+    RUN_TEST(rgMemoryTest_hashIndexBatchMatchesSingle);
 }
