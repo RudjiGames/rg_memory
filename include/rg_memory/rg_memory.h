@@ -9,17 +9,17 @@
 
 #include <stdint.h> /* uint*_t */
 
-/* Keep neighbouring Arena instances on separate 64-byte cache lines. The bump
- * pointer m_pos is written on EVERY allocation, so two arenas packed in one
- * line (e.g. the per-worker `Arena scratch[N]` arrays the parallel decoders
- * use) would ping-pong that line between cores on every alloc -- classic false
- * sharing entirely off the data path. Mirrors RGM_CACHE_LINE (64) in the
- * private platform header. */
+/* Arena owners are placed with malloc, rgArenaAlloc and explicitly 16-byte-aligned
+ * allocations throughout the application. This declaration must not promise more
+ * than those placements provide: with AVX2/LTO, a 64-byte promise makes teardown
+ * emit aligned 32-byte stores and fault on a valid 16-byte-aligned owner (including
+ * the stylesheet preprocessor). Keep the public ABI at 16 bytes. Workers needing
+ * cache-line isolation must align/pad their owning storage separately. */
 #ifndef RG_MEMORY_CACHE_ALIGN
 #   if defined(_MSC_VER)
-#       define RG_MEMORY_CACHE_ALIGN __declspec(align(64))
+#       define RG_MEMORY_CACHE_ALIGN __declspec(align(16))
 #   elif defined(__GNUC__) || defined(__clang__)
-#       define RG_MEMORY_CACHE_ALIGN __attribute__((aligned(64)))
+#       define RG_MEMORY_CACHE_ALIGN __attribute__((aligned(16)))
 #   else
 #       define RG_MEMORY_CACHE_ALIGN
 #   endif
@@ -49,8 +49,8 @@ extern "C" {
      * Treat the fields as private to the implementation; do not read or
      * mutate them directly.
      *
-     * Cache-line aligned (64 B) so per-thread arena arrays don't false-share
-     * the hot m_pos store across cores; see RG_MEMORY_CACHE_ALIGN above.
+     * 16-byte aligned to match the allocation of its owners; see
+     * RG_MEMORY_CACHE_ALIGN above.
      */
 #if defined(_MSC_VER)
 #   pragma warning(push)
